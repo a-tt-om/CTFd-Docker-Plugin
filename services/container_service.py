@@ -287,13 +287,14 @@ class ContainerService:
                     else:
                         # TAILNET MODE: share network with tailscale-challenges
                         # Ports are NOT bound to host — only accessible via tailnet
+                        # PORT env tells the challenge which port to listen on (avoids conflict)
                         result = self.docker.create_container(
                             image=challenge.image,
                             internal_port=challenge.internal_port,
                             host_port=host_port,
                             ports=ports_map,
                             command=command,
-                            environment={'FLAG': flag},
+                            environment={'FLAG': flag, 'PORT': str(host_port)},
                             memory_limit=challenge.get_memory_limit(),
                             cpu_limit=challenge.get_cpu_limit(),
                             pids_limit=challenge.pids_limit,
@@ -304,10 +305,10 @@ class ContainerService:
                     
                     # 5. Update instance
                     instance.container_id = result['container_id']
-                    instance.connection_port = host_port
-                    instance.connection_ports = ports_map
                     
                     if use_subdomain:
+                        instance.connection_port = host_port
+                        instance.connection_ports = ports_map
                         # For subdomain routing: store URLs
                         urls = []
                         
@@ -351,6 +352,10 @@ class ContainerService:
                             'info': challenge.container_connection_info
                         }
                     else:
+                        # TAILNET MODE: use allocated port (challenge reads PORT env to listen)
+                        instance.connection_port = host_port
+                        instance.connection_ports = ports_map
+                        
                         # For port-based routing: store host:port
                         instance.connection_host = connection_host
                         instance.connection_info = {
