@@ -15,6 +15,10 @@ from .port_manager import PortManager
 
 logger = logging.getLogger(__name__)
 
+# Hardcoded: challenge containers share network with this tailscale container
+# so they are only accessible via the tailnet
+TAILNET_CONTAINER = 'tailscale-challenges'
+
 
 class ContainerService:
     """
@@ -189,30 +193,19 @@ class ContainerService:
                     connection_host = ContainerConfig.get('connection_host', 'localhost')
 
                     # 3. Determine Network
-                    # HYBRID STRATEGY:
-                    # - Subdomain: Use shared 'ctfd-challenges' (ICC=True) so Traefik can route
-                    # - HostType: Use shared 'ctfd-isolated' (ICC=False) for strict isolation
+                    # TAILNET MODE: All challenges share network with tailscale-challenges
+                    # so they are only accessible via the tailnet IP.
+                    # Subdomain mode uses its own network for Traefik routing.
                     
-                    target_network = subdomain_network if use_subdomain else 'ctfd-isolated'
-                    
-                    if not use_subdomain:
-                        # Ensure isolated network exists with ICC=False
-                        self.docker.create_network(
-                            name='ctfd-isolated',
-                            internal=False, # Must be false to allow internet access
-                            driver='bridge',
-                            options={'com.docker.network.bridge.enable_icc': 'false'}
-                        )
-                    
-                    # 3. Generate subdomain if enabled
-                    subdomain = None
-                    full_hostname = None
                     if use_subdomain:
+                        target_network = subdomain_network
                         # Generate random 16-char subdomain with prefix format for Cloudflare Free SSL
-                        # Format: c-{random}.domain.com (single level, compatible with free SSL)
                         subdomain = f"c-{uuid_module.uuid4().hex[:16]}"
                         full_hostname = f"{subdomain}.{subdomain_base_domain}"
                         logger.info(f"Generated subdomain: {full_hostname}")
+                    else:
+                        subdomain = None
+                        full_hostname = None
                     
                     # 4. Create Docker container
                     # Generate container name: challengename_accountid
@@ -273,21 +266,41 @@ class ContainerService:
                                 f'traefik.http.services.{current_service_name}.loadbalancer.server.port': str(p),
                             })
                     
-                    result = self.docker.create_container(
-                        image=challenge.image,
-                        internal_port=challenge.internal_port,
-                        host_port=host_port,
-                        ports=ports_map,
-                        command=command,
-                        environment={'FLAG': flag},
-                        memory_limit=challenge.get_memory_limit(),
-                        cpu_limit=challenge.get_cpu_limit(),
-                        pids_limit=challenge.pids_limit,
-                        name=container_name,
-                        labels=labels,
-                        network=target_network,
-                        use_traefik=use_subdomain
-                    )
+                    # Create container with tailnet network mode (non-subdomain)
+                    # or with target_network (subdomain/traefik)
+                    if use_subdomain:
+                        result = self.docker.create_container(
+                            image=challenge.image,
+                            internal_port=challenge.internal_port,
+                            host_port=host_port,
+                            ports=ports_map,
+                            command=command,
+                            environment={'FLAG': flag},
+                            memory_limit=challenge.get_memory_limit(),
+                            cpu_limit=challenge.get_cpu_limit(),
+                            pids_limit=challenge.pids_limit,
+                            name=container_name,
+                            labels=labels,
+                            network=target_network,
+                            use_traefik=True
+                        )
+                    else:
+                        # TAILNET MODE: share network with tailscale-challenges
+                        # Ports are NOT bound to host — only accessible via tailnet
+                        result = self.docker.create_container(
+                            image=challenge.image,
+                            internal_port=challenge.internal_port,
+                            host_port=host_port,
+                            ports=ports_map,
+                            command=command,
+                            environment={'FLAG': flag},
+                            memory_limit=challenge.get_memory_limit(),
+                            cpu_limit=challenge.get_cpu_limit(),
+                            pids_limit=challenge.pids_limit,
+                            name=container_name,
+                            labels=labels,
+                            network_mode=f'container:{TAILNET_CONTAINER}'
+                        )
                     
                     # 5. Update instance
                     instance.container_id = result['container_id']

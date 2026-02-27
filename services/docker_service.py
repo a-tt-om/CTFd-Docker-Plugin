@@ -73,7 +73,8 @@ class DockerService:
         labels: Dict[str, str] = None,
         name: str = None,
         network: str = None,  # Network to connect for Traefik routing
-        use_traefik: bool = False  # If True, don't expose host port (Traefik handles routing)
+        use_traefik: bool = False,  # If True, don't expose host port (Traefik handles routing)
+        network_mode: str = None  # Share network with another container (e.g. 'container:tailscale-challenges')
     ) -> Dict[str, Any]:
         """
         Create and start a container
@@ -81,7 +82,7 @@ class DockerService:
         Args:
             image: Docker image name
             internal_port: Port inside container
-            host_port: Port on host to expose (ignored if use_traefik=True)
+            host_port: Port on host to expose (ignored if use_traefik=True or network_mode is set)
             command: Command to run
             environment: Environment variables
             memory_limit: Memory limit (e.g., "512m", "1g")
@@ -91,6 +92,9 @@ class DockerService:
             name: Container name (optional)
             network: Docker network to connect (for Traefik routing)
             use_traefik: If True, use Traefik for routing instead of host port
+            network_mode: If set, share network stack with another container.
+                         Cannot be used together with 'network' or 'ports'.
+                         Example: 'container:tailscale-challenges'
         
         Returns:
             {
@@ -114,43 +118,63 @@ class DockerService:
                 'ctfd.plugin': 'containers'
             })
             
-            # Port mapping - only if not using Traefik
-            ports_config = None
-            if not use_traefik:
-                if ports:
-                    # New multi-port mode: ports = {'80': 30001, '22': 30002}
-                    ports_config = {}
-                    for internal, external in ports.items():
-                        ports_config[f'{internal}/tcp'] = external
-                else:
-                    # Legacy single port mode
-                    ports_config = {f'{internal_port}/tcp': host_port}
-            
-            # Network configuration
-            network_arg = network if network else 'bridge'
-            # If network is provided, network_mode should be None (or handled by network arg)
-            # docker-py run() takes 'network' to connect to a specific network
-            
-            # Create container
-            container = self.client.containers.run(
-                image=image,
-                name=name,
-                command=command,
-                detach=True,
-                auto_remove=True,  # Auto remove when container stops/fails
-                ports=ports_config,
-                environment=environment or {},
-                mem_limit=memory_limit,
-                cpu_quota=cpu_quota,
-                cpu_period=cpu_period,
-                pids_limit=pids_limit,
-                labels=container_labels,
-                network=network_arg,
-                # Security options
-                cap_drop=['ALL'],  # Drop all capabilities
-                cap_add=['CHOWN', 'SETUID', 'SETGID'],  # Add back minimal caps
-                security_opt=['no-new-privileges'],
-            )
+            # Network mode: share network stack with another container (e.g. tailscale)
+            # When using network_mode, Docker does NOT allow ports or network args
+            if network_mode:
+                container = self.client.containers.run(
+                    image=image,
+                    name=name,
+                    command=command,
+                    detach=True,
+                    auto_remove=True,
+                    environment=environment or {},
+                    mem_limit=memory_limit,
+                    cpu_quota=cpu_quota,
+                    cpu_period=cpu_period,
+                    pids_limit=pids_limit,
+                    labels=container_labels,
+                    network_mode=network_mode,
+                    # Security options
+                    cap_drop=['ALL'],
+                    cap_add=['CHOWN', 'SETUID', 'SETGID'],
+                    security_opt=['no-new-privileges'],
+                )
+            else:
+                # Port mapping - only if not using Traefik
+                ports_config = None
+                if not use_traefik:
+                    if ports:
+                        # New multi-port mode: ports = {'80': 30001, '22': 30002}
+                        ports_config = {}
+                        for internal, external in ports.items():
+                            ports_config[f'{internal}/tcp'] = external
+                    else:
+                        # Legacy single port mode
+                        ports_config = {f'{internal_port}/tcp': host_port}
+                
+                # Network configuration
+                network_arg = network if network else 'bridge'
+                
+                # Create container
+                container = self.client.containers.run(
+                    image=image,
+                    name=name,
+                    command=command,
+                    detach=True,
+                    auto_remove=True,
+                    ports=ports_config,
+                    environment=environment or {},
+                    mem_limit=memory_limit,
+                    cpu_quota=cpu_quota,
+                    cpu_period=cpu_period,
+                    pids_limit=pids_limit,
+                    labels=container_labels,
+                    network=network_arg,
+                    # Security options
+                    cap_drop=['ALL'],
+                    cap_add=['CHOWN', 'SETUID', 'SETGID'],
+                    security_opt=['no-new-privileges'],
+                )
             
             # No need to manually connect if network arg is used
             logger.info(f"Created container {container.id[:12]} from image {image}")
