@@ -477,7 +477,6 @@ class DockerService:
                     cpu_period=cpu_period,
                     pids_limit=pids_limit,
                     labels=c_labels,
-                    network=network_name,
                     networking_config=self.client.api.create_networking_config({
                         network_name: self.client.api.create_endpoint_config(
                             aliases=[c_def['name']]
@@ -510,7 +509,6 @@ class DockerService:
                 cpu_period=cpu_period,
                 pids_limit=pids_limit,
                 labels=entry_labels,
-                network=network_name,
                 networking_config=self.client.api.create_networking_config({
                     network_name: self.client.api.create_endpoint_config(
                         aliases=[entry_def['name']]
