@@ -478,6 +478,11 @@ class DockerService:
                     pids_limit=pids_limit,
                     labels=c_labels,
                     network=network_name,
+                    networking_config=self.client.api.create_networking_config({
+                        network_name: self.client.api.create_endpoint_config(
+                            aliases=[c_def['name']]
+                        )
+                    }),
                 )
                 created_containers.append(container)
                 logger.info(f"Created internal container: {c_name} ({container.id[:12]})")
@@ -506,6 +511,11 @@ class DockerService:
                 pids_limit=pids_limit,
                 labels=entry_labels,
                 network=network_name,
+                networking_config=self.client.api.create_networking_config({
+                    network_name: self.client.api.create_endpoint_config(
+                        aliases=[entry_def['name']]
+                    )
+                }),
             )
             created_containers.append(entry_container)
             logger.info(f"Created entry container: {entry_name} ({entry_container.id[:12]})")
