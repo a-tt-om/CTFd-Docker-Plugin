@@ -459,7 +459,7 @@ class DockerService:
                 if i == entry_idx:
                     continue
                 
-                c_name = f"{name_prefix}_{c_def['name']}"
+                c_name = f"{name_prefix}-{c_def['name']}"
                 c_env = dict(c_def.get('environment', {}))
                 c_labels = dict(labels or {})
                 c_labels['ctfd.compose_role'] = 'internal'
@@ -484,7 +484,7 @@ class DockerService:
             
             # 4. Create entry container on private network (NO port mapping)
             entry_def = containers_config[entry_idx]
-            entry_name = f"{name_prefix}_{entry_def['name']}"
+            entry_name = f"{name_prefix}-{entry_def['name']}"
             entry_env = dict(entry_def.get('environment', {}))
             entry_env['FLAG'] = flag
             entry_env['PORT'] = str(entry_port)

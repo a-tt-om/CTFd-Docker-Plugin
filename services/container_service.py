@@ -468,7 +468,7 @@ class ContainerService:
             
             # Generate names
             safe_name = re.sub(r'[^a-zA-Z0-9-]', '', challenge.name.replace(' ', '-').lower())
-            name_prefix = f"{safe_name}_{instance.account_id}"
+            name_prefix = f"{safe_name}-{instance.account_id}"
             network_name = f"ctfd-compose-{instance.uuid[:12]}"
             
             # Labels for all containers
