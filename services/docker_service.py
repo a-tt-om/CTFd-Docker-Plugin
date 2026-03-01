@@ -477,14 +477,13 @@ class DockerService:
                     cpu_period=cpu_period,
                     pids_limit=pids_limit,
                     labels=c_labels,
-                    networking_config=self.client.api.create_networking_config({
-                        network_name: self.client.api.create_endpoint_config(
-                            aliases=[c_def['name']]
-                        )
-                    }),
+                    network=network_name,
                 )
+                # Add DNS alias (e.g. "web", "db") so other containers can find it by YAML name
+                network.disconnect(container)
+                network.connect(container, aliases=[c_def['name']])
                 created_containers.append(container)
-                logger.info(f"Created internal container: {c_name} ({container.id[:12]})")
+                logger.info(f"Created internal container: {c_name} alias={c_def['name']} ({container.id[:12]})")
             
             # 4. Create entry container on private network (NO port mapping)
             entry_def = containers_config[entry_idx]
@@ -509,14 +508,13 @@ class DockerService:
                 cpu_period=cpu_period,
                 pids_limit=pids_limit,
                 labels=entry_labels,
-                networking_config=self.client.api.create_networking_config({
-                    network_name: self.client.api.create_endpoint_config(
-                        aliases=[entry_def['name']]
-                    )
-                }),
+                network=network_name,
             )
+            # Add DNS alias
+            network.disconnect(entry_container)
+            network.connect(entry_container, aliases=[entry_def['name']])
             created_containers.append(entry_container)
-            logger.info(f"Created entry container: {entry_name} ({entry_container.id[:12]})")
+            logger.info(f"Created entry container: {entry_name} alias={entry_def['name']} ({entry_container.id[:12]})")
             
             # 5. Connect tailscale-challenges to the private bridge network
             ts_container = self.client.containers.get(tailnet_container)
