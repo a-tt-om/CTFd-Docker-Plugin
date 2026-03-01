@@ -410,30 +410,23 @@ class DockerService:
         Create a group of containers with a private network (compose-like).
         
         All containers connect to a private bridge network for inter-container DNS.
-        Entry container (with 'expose') publishes port ONLY on the tailscale IP
-        for security — port is NOT accessible from the public internet.
+        Entry container is exposed via tailscale serve — no host port mapping needed.
+        
+        Flow:
+        1. Create private bridge network
+        2. Create all containers on bridge
+        3. Connect tailscale-challenges to the bridge
+        4. Run 'tailscale serve --bg --tcp PORT tcp://entry:port' inside tailscale-challenges
+        
+        Result: challenges.ts.bksec.vn:PORT → entry container (tailnet only, no public exposure)
         """
         if not self.is_connected():
             raise Exception("Docker is not connected")
         
-        # Get tailscale IP from the tailscale-challenges container
-        bind_ip = '0.0.0.0'  # Fallback (will be overridden)
-        try:
-            ts_container = self.client.containers.get(tailnet_container)
-            exit_code, output = ts_container.exec_run('tailscale ip -4')
-            if exit_code == 0:
-                bind_ip = output.decode().strip().split('\n')[0]
-                logger.info(f"Got tailscale IP from {tailnet_container}: {bind_ip}")
-            else:
-                logger.warning(f"Failed to get tailscale IP (exit {exit_code}), trying DNS")
-                import socket
-                bind_ip = socket.gethostbyname(connection_host)
-                logger.info(f"Resolved {connection_host} -> {bind_ip}")
-        except Exception as e:
-            logger.warning(f"Cannot get tailscale IP: {e}, port will be on 0.0.0.0")
-        
         created_containers = []
         network = None
+        ts_connected = False
+        ts_serve_port = None
         
         try:
             # 1. Create private bridge network
@@ -462,7 +455,6 @@ class DockerService:
                 raise Exception("No container has 'expose' defined. One container must expose a port.")
             
             # 3. Create non-entry containers (on private network only)
-            # NOTE: No cap_drop for internal containers — databases need full caps
             for i, c_def in enumerate(containers_config):
                 if i == entry_idx:
                     continue
@@ -490,7 +482,7 @@ class DockerService:
                 created_containers.append(container)
                 logger.info(f"Created internal container: {c_name} ({container.id[:12]})")
             
-            # 4. Create entry container on private network WITH port mapping
+            # 4. Create entry container on private network (NO port mapping)
             entry_def = containers_config[entry_idx]
             entry_name = f"{name_prefix}_{entry_def['name']}"
             entry_env = dict(entry_def.get('environment', {}))
@@ -501,10 +493,6 @@ class DockerService:
             entry_labels['ctfd.compose_role'] = 'entry'
             entry_labels['ctfd.compose_name'] = entry_def['name']
             
-            # Port mapping: bind ONLY to tailscale IP for security
-            ports_config = {f'{entry_port}/tcp': (bind_ip, host_port)}
-            logger.info(f"Port binding: {bind_ip}:{host_port} -> container:{entry_port}")
-            
             entry_container = self.client.containers.run(
                 image=entry_def['image'],
                 name=entry_name,
@@ -512,7 +500,6 @@ class DockerService:
                 detach=True,
                 auto_remove=True,
                 environment=entry_env,
-                ports=ports_config,
                 mem_limit=memory_limit,
                 cpu_quota=cpu_quota,
                 cpu_period=cpu_period,
@@ -521,7 +508,22 @@ class DockerService:
                 network=network_name,
             )
             created_containers.append(entry_container)
-            logger.info(f"Created entry container: {entry_name} ({entry_container.id[:12]}) port {bind_ip}:{host_port}->{entry_port}")
+            logger.info(f"Created entry container: {entry_name} ({entry_container.id[:12]})")
+            
+            # 5. Connect tailscale-challenges to the private bridge network
+            ts_container = self.client.containers.get(tailnet_container)
+            network.connect(ts_container)
+            ts_connected = True
+            logger.info(f"Connected {tailnet_container} to {network_name}")
+            
+            # 6. Set up tailscale serve to forward tailnet traffic to entry container
+            serve_cmd = f'tailscale serve --bg --tcp {host_port} tcp://{entry_name}:{entry_port}'
+            exit_code, output = ts_container.exec_run(serve_cmd)
+            if exit_code != 0:
+                raise Exception(f"tailscale serve failed (exit {exit_code}): {output.decode()}")
+            ts_serve_port = host_port
+            logger.info(f"Tailscale serve: port {host_port} -> {entry_name}:{entry_port}")
+            logger.info(f"Output: {output.decode().strip()}")
             
             all_ids = [c.id for c in created_containers]
             
@@ -534,6 +536,21 @@ class DockerService:
             
         except Exception as e:
             logger.error(f"Error creating container group: {e}")
+            # Cleanup tailscale serve
+            if ts_serve_port:
+                try:
+                    ts_container = self.client.containers.get(tailnet_container)
+                    ts_container.exec_run(f'tailscale serve --tcp {ts_serve_port} off')
+                except:
+                    pass
+            # Disconnect tailscale from network
+            if ts_connected and network:
+                try:
+                    ts_container = self.client.containers.get(tailnet_container)
+                    network.disconnect(ts_container)
+                except:
+                    pass
+            # Stop containers
             for c in created_containers:
                 try:
                     c.stop(timeout=3)
@@ -547,9 +564,15 @@ class DockerService:
                     pass
             raise
     
-    def stop_container_group(self, container_ids: list, network_id: str = None) -> bool:
+    def stop_container_group(
+        self, 
+        container_ids: list, 
+        network_id: str = None,
+        host_port: int = None,
+        tailnet_container: str = 'tailscale-challenges',
+    ) -> bool:
         """
-        Stop all containers in a group and remove the private network.
+        Stop all containers in a group, clean up tailscale serve, and remove the private network.
         """
         if not self.is_connected():
             logger.warning("Docker not connected, cannot stop container group")
@@ -557,6 +580,18 @@ class DockerService:
         
         success = True
         
+        # 1. Remove tailscale serve forwarding
+        if host_port:
+            try:
+                ts_container = self.client.containers.get(tailnet_container)
+                ts_container.exec_run(f'tailscale serve --tcp {host_port} off')
+                logger.info(f"Removed tailscale serve for port {host_port}")
+            except docker.errors.NotFound:
+                logger.warning(f"Tailscale container {tailnet_container} not found")
+            except Exception as e:
+                logger.warning(f"Error removing tailscale serve: {e}")
+        
+        # 2. Stop containers
         for cid in (container_ids or []):
             try:
                 container = self.client.containers.get(cid)
@@ -569,9 +604,17 @@ class DockerService:
                 logger.error(f"Error stopping container {cid[:12]}: {e}")
                 success = False
         
+        # 3. Disconnect tailscale-challenges from network & remove network
         if network_id:
             try:
                 network = self.client.networks.get(network_id)
+                # Disconnect tailscale-challenges first
+                try:
+                    ts_container = self.client.containers.get(tailnet_container)
+                    network.disconnect(ts_container)
+                    logger.info(f"Disconnected {tailnet_container} from network {network_id[:12]}")
+                except:
+                    pass
                 network.remove()
                 logger.info(f"Removed private network {network_id[:12]}")
             except docker.errors.NotFound:

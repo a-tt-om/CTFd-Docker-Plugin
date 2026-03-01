@@ -635,7 +635,12 @@ class ContainerService:
             # Stop Docker container(s)
             if instance.container_ids:
                 # Multi-container mode: stop all containers + remove network
-                self.docker.stop_container_group(instance.container_ids, instance.network_id)
+                self.docker.stop_container_group(
+                    instance.container_ids, 
+                    instance.network_id,
+                    host_port=instance.connection_port,
+                    tailnet_container=TAILNET_CONTAINER,
+                )
             elif instance.container_id:
                 # Single-container mode
                 self.docker.stop_container(instance.container_id)
