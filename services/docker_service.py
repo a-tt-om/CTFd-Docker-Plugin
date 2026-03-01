@@ -404,6 +404,7 @@ class DockerService:
         cpu_limit: float = 0.5,
         pids_limit: int = 100,
         connection_host: str = 'localhost',
+        tailnet_container: str = 'tailscale-challenges',
     ) -> Dict[str, Any]:
         """
         Create a group of containers with a private network (compose-like).
@@ -415,15 +416,21 @@ class DockerService:
         if not self.is_connected():
             raise Exception("Docker is not connected")
         
-        # Resolve connection_host to IP for port binding
-        import socket
-        bind_ip = '127.0.0.1'  # Safe fallback
+        # Get tailscale IP from the tailscale-challenges container
+        bind_ip = '0.0.0.0'  # Fallback (will be overridden)
         try:
-            resolved_ip = socket.gethostbyname(connection_host)
-            bind_ip = resolved_ip
-            logger.info(f"Resolved {connection_host} -> {bind_ip} for port binding")
-        except socket.gaierror:
-            logger.warning(f"Cannot resolve {connection_host}, falling back to 127.0.0.1")
+            ts_container = self.client.containers.get(tailnet_container)
+            exit_code, output = ts_container.exec_run('tailscale ip -4')
+            if exit_code == 0:
+                bind_ip = output.decode().strip().split('\n')[0]
+                logger.info(f"Got tailscale IP from {tailnet_container}: {bind_ip}")
+            else:
+                logger.warning(f"Failed to get tailscale IP (exit {exit_code}), trying DNS")
+                import socket
+                bind_ip = socket.gethostbyname(connection_host)
+                logger.info(f"Resolved {connection_host} -> {bind_ip}")
+        except Exception as e:
+            logger.warning(f"Cannot get tailscale IP: {e}, port will be on 0.0.0.0")
         
         created_containers = []
         network = None
@@ -455,6 +462,7 @@ class DockerService:
                 raise Exception("No container has 'expose' defined. One container must expose a port.")
             
             # 3. Create non-entry containers (on private network only)
+            # NOTE: No cap_drop for internal containers — databases need full caps
             for i, c_def in enumerate(containers_config):
                 if i == entry_idx:
                     continue
@@ -478,9 +486,6 @@ class DockerService:
                     pids_limit=pids_limit,
                     labels=c_labels,
                     network=network_name,
-                    cap_drop=['ALL'],
-                    cap_add=['CHOWN', 'SETUID', 'SETGID'],
-                    security_opt=['no-new-privileges'],
                 )
                 created_containers.append(container)
                 logger.info(f"Created internal container: {c_name} ({container.id[:12]})")
@@ -514,12 +519,9 @@ class DockerService:
                 pids_limit=pids_limit,
                 labels=entry_labels,
                 network=network_name,
-                cap_drop=['ALL'],
-                cap_add=['CHOWN', 'SETUID', 'SETGID'],
-                security_opt=['no-new-privileges'],
             )
             created_containers.append(entry_container)
-            logger.info(f"Created entry container: {entry_name} ({entry_container.id[:12]}) port {host_port}->{entry_port}")
+            logger.info(f"Created entry container: {entry_name} ({entry_container.id[:12]}) port {bind_ip}:{host_port}->{entry_port}")
             
             all_ids = [c.id for c in created_containers]
             
