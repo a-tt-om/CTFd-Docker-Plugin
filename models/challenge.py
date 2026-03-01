@@ -100,4 +100,3 @@ class ContainerComposeChallenge(ContainerChallenge):
     but with a different polymorphic identity for SQLAlchemy to recognize.
     """
     __mapper_args__ = {"polymorphic_identity": "container-compose"}
-    __table_args__ = {'extend_existing': True}
