@@ -403,15 +403,27 @@ class DockerService:
         memory_limit: str = '512m',
         cpu_limit: float = 0.5,
         pids_limit: int = 100,
-        tailnet_container: str = 'tailscale-challenges',
+        connection_host: str = 'localhost',
     ) -> Dict[str, Any]:
         """
         Create a group of containers with a private network (compose-like).
-        Entry container shares network with tailscale-challenges AND private network.
-        Other containers only connect to private network.
+        
+        All containers connect to a private bridge network for inter-container DNS.
+        Entry container (with 'expose') publishes port ONLY on the tailscale IP
+        for security — port is NOT accessible from the public internet.
         """
         if not self.is_connected():
             raise Exception("Docker is not connected")
+        
+        # Resolve connection_host to IP for port binding
+        import socket
+        bind_ip = '127.0.0.1'  # Safe fallback
+        try:
+            resolved_ip = socket.gethostbyname(connection_host)
+            bind_ip = resolved_ip
+            logger.info(f"Resolved {connection_host} -> {bind_ip} for port binding")
+        except socket.gaierror:
+            logger.warning(f"Cannot resolve {connection_host}, falling back to 127.0.0.1")
         
         created_containers = []
         network = None
@@ -442,7 +454,7 @@ class DockerService:
             if entry_idx is None:
                 raise Exception("No container has 'expose' defined. One container must expose a port.")
             
-            # 3. Create non-entry containers first (on private network only)
+            # 3. Create non-entry containers (on private network only)
             for i, c_def in enumerate(containers_config):
                 if i == entry_idx:
                     continue
@@ -473,16 +485,20 @@ class DockerService:
                 created_containers.append(container)
                 logger.info(f"Created internal container: {c_name} ({container.id[:12]})")
             
-            # 4. Create entry container with tailnet network
+            # 4. Create entry container on private network WITH port mapping
             entry_def = containers_config[entry_idx]
             entry_name = f"{name_prefix}_{entry_def['name']}"
             entry_env = dict(entry_def.get('environment', {}))
             entry_env['FLAG'] = flag
-            entry_env['PORT'] = str(host_port)
+            entry_env['PORT'] = str(entry_port)
             
             entry_labels = dict(labels or {})
             entry_labels['ctfd.compose_role'] = 'entry'
             entry_labels['ctfd.compose_name'] = entry_def['name']
+            
+            # Port mapping: bind ONLY to tailscale IP for security
+            ports_config = {f'{entry_port}/tcp': (bind_ip, host_port)}
+            logger.info(f"Port binding: {bind_ip}:{host_port} -> container:{entry_port}")
             
             entry_container = self.client.containers.run(
                 image=entry_def['image'],
@@ -491,22 +507,19 @@ class DockerService:
                 detach=True,
                 auto_remove=True,
                 environment=entry_env,
+                ports=ports_config,
                 mem_limit=memory_limit,
                 cpu_quota=cpu_quota,
                 cpu_period=cpu_period,
                 pids_limit=pids_limit,
                 labels=entry_labels,
-                network_mode=f'container:{tailnet_container}',
+                network=network_name,
                 cap_drop=['ALL'],
                 cap_add=['CHOWN', 'SETUID', 'SETGID'],
                 security_opt=['no-new-privileges'],
             )
             created_containers.append(entry_container)
-            logger.info(f"Created entry container: {entry_name} ({entry_container.id[:12]})")
-            
-            # 5. Connect entry container to private network too
-            network.connect(entry_container, aliases=[entry_def['name']])
-            logger.info(f"Connected entry container to private network with alias '{entry_def['name']}'")
+            logger.info(f"Created entry container: {entry_name} ({entry_container.id[:12]}) port {host_port}->{entry_port}")
             
             all_ids = [c.id for c in created_containers]
             

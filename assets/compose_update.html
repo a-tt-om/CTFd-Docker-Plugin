@@ -1,0 +1,133 @@
+{% extends "admin/challenges/update.html" %}
+
+{% block connection_info %}
+<div class="form-group d-none">
+	<label>Connection Info<br>
+		<small class="form-text text-muted">Auto-generated from container connection settings</small>
+	</label>
+	<input type="text" class="form-control chal-connection-info" name="connection_info"
+		value="{{ challenge.container_connection_info | default('', true) }}" readonly>
+</div>
+{% endblock %}
+
+{% block value %}
+<div class="form-group">
+	<label for="scoring_type">Scoring Type<br>
+		<small class="form-text text-muted">Choose between static points or dynamic decay scoring</small>
+	</label>
+	<select class="form-control" id="scoring_type" name="scoring_type">
+		<option value="standard" {% if not challenge.container_decay %}selected{% endif %}>Standard (Fixed Points)</option>
+		<option value="dynamic" {% if challenge.container_decay %}selected{% endif %}>Dynamic (Decay-based)</option>
+	</select>
+</div>
+
+<!-- Standard Scoring -->
+<div id="standard-scoring" class="scoring-section" {% if challenge.container_decay %}style="display: none;"{% endif %}>
+	<div class="form-group">
+		<label for="value">Points<br>
+			<small class="form-text text-muted">Fixed number of points for this challenge</small>
+		</label>
+		<input type="number" class="form-control" name="value" id="standard_value"
+			value="{{ challenge.value if not challenge.container_decay else '' }}">
+	</div>
+</div>
+
+<!-- Dynamic Scoring -->
+<div id="dynamic-scoring" class="scoring-section" {% if not challenge.container_decay %}style="display: none;"{% endif %}>
+	<div class="form-group">
+		<label>Current Value<br>
+			<small class="form-text text-muted">This is how many points the challenge is worth right now.</small>
+		</label>
+		<input type="number" class="form-control chal-value" name="current_value" value="{{ challenge.value }}" disabled>
+	</div>
+	<div class="form-group">
+		<label>Initial Value<br>
+			<small class="form-text text-muted">This is how many points the challenge was worth initially.</small>
+		</label>
+		<input type="number" class="form-control" name="initial" id="dynamic_initial" value="{{ challenge.container_initial }}">
+	</div>
+	<div class="form-group">
+		<label>Decay Function</label>
+		<select class="form-control" name="decay_function" id="decay_function">
+			<option value="linear" {% if challenge.decay_function=='linear' or not challenge.decay_function %}selected{% endif %}>Linear</option>
+			<option value="logarithmic" {% if challenge.decay_function=='logarithmic' %}selected{% endif %}>Logarithmic</option>
+		</select>
+	</div>
+	<div class="form-group">
+		<label>Decay Limit</label>
+		<input type="number" class="form-control" name="decay" id="dynamic_decay" value="{{ challenge.container_decay }}">
+	</div>
+	<div class="form-group">
+		<label>Minimum Value</label>
+		<input type="number" class="form-control" name="minimum" id="dynamic_minimum" value="{{ challenge.container_minimum }}">
+	</div>
+</div>
+
+<!-- Compose Config -->
+<div class="form-group">
+	<label>
+		<strong>Compose Config (YAML)</strong><br>
+		<small class="form-text text-muted">
+			One container must have <code>expose</code> to be the entry point.
+			All containers share a private network.
+		</small>
+	</label>
+	<textarea class="form-control" name="compose_config" id="compose_config" rows="10" required>{{ challenge.compose_config or '' }}</textarea>
+</div>
+
+<!-- Hidden image field -->
+<input type="hidden" name="image" value="[compose-mode]">
+
+<div class="form-group">
+	<script>
+		var container_connection_type_selected = "{{ challenge.container_connection_type }}";
+	</script>
+	<label>Connect type</label>
+	<select class="form-control" name="connection_type" id="connect-type" required>
+		<option value="" selected disabled>Choose a value...</option>
+		<option value="http">Web (HTTP)</option>
+		<option value="tcp">TCP</option>
+	</select>
+</div>
+
+<input type="hidden" name="internal_port" id="internal_port_hidden" value="{{ challenge.internal_port }}">
+
+<div class="form-group">
+	<label>Docker Command (Optional)</label>
+	<input type="text" class="form-control" name="command" value="{{ challenge.command }}">
+</div>
+
+<!-- Flag Pattern -->
+<div class="form-group">
+	<label for="flag_pattern">Flag Pattern<br>
+		<small class="form-text text-muted">
+			<strong>Static:</strong> <code>CTF{flag}</code> |
+			<strong>Random:</strong> <code>CTF{flag_&lt;ran_8&gt;}</code>
+		</small>
+	</label>
+	<input type="text" class="form-control" id="flag_pattern" placeholder="CTF{example_flag}">
+	<small id="flag_pattern_preview" class="form-text text-info"></small>
+</div>
+
+<script>
+	document.addEventListener('DOMContentLoaded', function () {
+		const mode = "{{ challenge.flag_mode|default('static') }}";
+		const prefix = "{{ challenge.flag_prefix|default('CTF{') }}";
+		const suffix = "{{ challenge.flag_suffix|default('}') }}";
+		const length = "{{ challenge.random_flag_length|default(10) }}";
+		let pattern = '';
+		if (mode === 'random' && length > 0) {
+			pattern = prefix + '<ran_' + length + '>' + suffix;
+		} else {
+			pattern = prefix + suffix;
+		}
+		document.getElementById('flag_pattern').value = pattern;
+	});
+</script>
+
+<input type="hidden" id="flag_mode" name="flag_mode" value="{{ challenge.flag_mode|default('static') }}">
+<input type="hidden" id="flag_prefix" name="flag_prefix" value="{{ challenge.flag_prefix|default('CTF{') }}">
+<input type="hidden" id="flag_suffix" name="flag_suffix" value="{{ challenge.flag_suffix|default('}') }}">
+<input type="hidden" id="random_flag_length" name="random_flag_length" value="{{ challenge.random_flag_length|default(0) }}">
+
+{% endblock %}

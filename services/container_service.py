@@ -493,7 +493,7 @@ class ContainerService:
                 memory_limit=challenge.get_memory_limit(),
                 cpu_limit=challenge.get_cpu_limit(),
                 pids_limit=challenge.pids_limit,
-                tailnet_container=TAILNET_CONTAINER,
+                connection_host=connection_host,
             )
             
             # Update instance

@@ -98,11 +98,6 @@ class ContainerChallengeType(BaseChallenge):
             mapped_data[mapped_key] = value
         
         # Create challenge with mapped data
-        # If compose_config is set, use a placeholder image (required by DB but ignored)
-        if mapped_data.get('compose_config') and mapped_data['compose_config'].strip():
-            if not mapped_data.get('image') or mapped_data['image'] == '':
-                mapped_data['image'] = '[compose-mode]'
-        
         challenge = cls.challenge_model(**mapped_data)
         
         # Set initial value
@@ -395,6 +390,65 @@ class ContainerChallengeType(BaseChallenge):
         return challenge
 
 
+class ContainerComposeChallengeType(ContainerChallengeType):
+    """
+    Container Compose Challenge Type
+    
+    Multi-container challenges using YAML configuration.
+    Each instance creates a private Docker network with multiple containers.
+    Entry container (with 'expose') is accessible via Tailscale port binding.
+    """
+    id = "container-compose"
+    name = "container-compose"
+    templates = {
+        "create": "/plugins/containers/assets/compose_create.html",
+        "update": "/plugins/containers/assets/compose_update.html",
+        "view": "/plugins/containers/assets/view.html",
+    }
+    scripts = {
+        "create": "/plugins/containers/assets/compose_create.js",
+        "update": "/plugins/containers/assets/compose_update.js",
+        "view": "/plugins/containers/assets/view.js",
+    }
+    challenge_model = ContainerChallenge
+    
+    @classmethod
+    def create(cls, request):
+        """Force image to [compose-mode] for compose challenges"""
+        from CTFd.models import db
+        
+        data = request.form or request.get_json()
+        
+        # Ensure image is set to compose placeholder
+        if hasattr(data, 'to_dict'):
+            data = data.to_dict(flat=True)
+        else:
+            data = dict(data)
+        data['image'] = '[compose-mode]'
+        
+        # Re-wrap as a simple object for parent create
+        class FakeRequest:
+            def __init__(self, d):
+                self.form = d
+            def get_json(self):
+                return self.form
+        
+        return super().create(FakeRequest(data))
+    
+    @classmethod
+    def read(cls, challenge):
+        """Override to use compose type_data"""
+        data = super().read(challenge)
+        data['type'] = cls.id
+        data['type_data'] = {
+            'id': cls.id,
+            'name': cls.name,
+            'templates': cls.templates,
+            'scripts': cls.scripts,
+        }
+        return data
+
+
 # Global service instances
 docker_service = None
 flag_service = None
@@ -503,9 +557,10 @@ def load(app: Flask):
     redis_expiration_service.start_listener()
     logger.info("Redis expiration service initialized and listener started")
     
-    # Register challenge type
+    # Register challenge types
     CHALLENGE_CLASSES["container"] = ContainerChallengeType
-    logger.info("Registered container challenge type")
+    CHALLENGE_CLASSES["container-compose"] = ContainerComposeChallengeType
+    logger.info("Registered container and container-compose challenge types")
     
     # Register plugin assets
     register_plugin_assets_directory(
