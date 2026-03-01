@@ -187,21 +187,41 @@ containers:
 </div>
 
 <script>
-  // Toggle image field requirement based on compose_config
+  // Toggle image field when compose_config is used
   document.addEventListener("DOMContentLoaded", function () {
     var compose = document.getElementById("compose_config");
     var imageSelect = document.getElementById("container-image");
     if (compose && imageSelect) {
       function toggleImage() {
+        var group = imageSelect.closest(".form-group");
         if (compose.value.trim()) {
+          // Compose mode: image not needed
           imageSelect.removeAttribute("required");
-          imageSelect.closest(".form-group").style.opacity = "0.5";
+          imageSelect.removeAttribute("disabled");
+          // Add compose-mode option if not exists
+          if (!document.getElementById("compose-mode-opt")) {
+            var opt = document.createElement("option");
+            opt.id = "compose-mode-opt";
+            opt.value = "[compose-mode]";
+            opt.textContent = "[Compose Mode - image not needed]";
+            imageSelect.insertBefore(opt, imageSelect.firstChild);
+          }
+          imageSelect.value = "[compose-mode]";
+          group.style.opacity = "0.5";
+          group.style.pointerEvents = "none";
         } else {
+          // Single image mode
+          var composeOpt = document.getElementById("compose-mode-opt");
+          if (composeOpt) composeOpt.remove();
           imageSelect.setAttribute("required", "");
-          imageSelect.closest(".form-group").style.opacity = "1";
+          group.style.opacity = "1";
+          group.style.pointerEvents = "auto";
         }
       }
       compose.addEventListener("input", toggleImage);
+      // Also run after images are loaded (they load async)
+      var observer = new MutationObserver(function() { toggleImage(); });
+      observer.observe(imageSelect, { childList: true });
       toggleImage();
     }
   });
