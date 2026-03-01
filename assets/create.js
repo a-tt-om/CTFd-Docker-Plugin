@@ -179,6 +179,45 @@ CTFd.plugin.run((_CTFd) => {
     var containerImage = document.getElementById("container-image");
     var containerImageDefault = document.getElementById("container-image-default");
 
+    // Helper: check if compose mode is active
+    function isComposeMode() {
+        var compose = document.getElementById("compose_config");
+        return compose && compose.value.trim().length > 0;
+    }
+
+    // Helper: apply compose mode styling to image selector
+    function applyComposeMode() {
+        if (!containerImage) return;
+        var group = containerImage.closest(".form-group");
+        if (isComposeMode()) {
+            containerImage.removeAttribute("required");
+            containerImage.removeAttribute("disabled");
+            // Add compose-mode option if not exists
+            if (!document.getElementById("compose-mode-opt")) {
+                var opt = document.createElement("option");
+                opt.id = "compose-mode-opt";
+                opt.value = "[compose-mode]";
+                opt.textContent = "[Compose Mode - image not needed]";
+                containerImage.insertBefore(opt, containerImage.firstChild);
+            }
+            containerImage.value = "[compose-mode]";
+            group.style.opacity = "0.5";
+            group.style.pointerEvents = "none";
+        } else {
+            var composeOpt = document.getElementById("compose-mode-opt");
+            if (composeOpt) composeOpt.remove();
+            containerImage.setAttribute("required", "");
+            group.style.opacity = "1";
+            group.style.pointerEvents = "auto";
+        }
+    }
+
+    // Listen for compose_config changes
+    var composeTextarea = document.getElementById("compose_config");
+    if (composeTextarea) {
+        composeTextarea.addEventListener("input", applyComposeMode);
+    }
+
     if (containerImage && containerImageDefault) {
         fetch("/admin/containers/api/images", {
             method: "GET",
@@ -207,10 +246,13 @@ CTFd.plugin.run((_CTFd) => {
                 containerImage.removeAttribute("disabled");
                 // console.log(('[Container Plugin] Loaded', data.images.length, 'Docker images');
             }
+            // After images loaded, apply compose mode if active
+            applyComposeMode();
         })
         .catch(error => {
             console.error("[Container Plugin] Error loading images:", error);
             containerImageDefault.innerHTML = "Error loading images";
+            applyComposeMode();
         });
     } else {
         console.warn('[Container Plugin] Container image elements not found');
