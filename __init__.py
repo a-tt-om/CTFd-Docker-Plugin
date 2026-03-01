@@ -16,6 +16,7 @@ from CTFd.utils import get_config
 # Import models
 from .models import (
     ContainerChallenge,
+    ContainerComposeChallenge,
     ContainerInstance,
     ContainerFlag,
     ContainerFlagAttempt,
@@ -410,7 +411,7 @@ class ContainerComposeChallengeType(ContainerChallengeType):
         "update": "/plugins/containers/assets/compose_update.js",
         "view": "/plugins/containers/assets/view.js",
     }
-    challenge_model = ContainerChallenge
+    challenge_model = ContainerComposeChallenge
     
     @classmethod
     def create(cls, request):

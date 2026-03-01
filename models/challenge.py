@@ -92,3 +92,12 @@ class ContainerChallenge(Challenges):
             self.value = kwargs["container_initial"]
         elif "initial" in kwargs:
             self.value = kwargs["initial"]
+
+
+class ContainerComposeChallenge(ContainerChallenge):
+    """
+    Container Compose challenge type - same fields as ContainerChallenge
+    but with a different polymorphic identity for SQLAlchemy to recognize.
+    """
+    __mapper_args__ = {"polymorphic_identity": "container-compose"}
+    __table_args__ = {'extend_existing': True}
