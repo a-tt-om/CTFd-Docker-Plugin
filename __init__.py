@@ -98,6 +98,11 @@ class ContainerChallengeType(BaseChallenge):
             mapped_data[mapped_key] = value
         
         # Create challenge with mapped data
+        # If compose_config is set, use a placeholder image (required by DB but ignored)
+        if mapped_data.get('compose_config') and mapped_data['compose_config'].strip():
+            if not mapped_data.get('image') or mapped_data['image'] == '':
+                mapped_data['image'] = '[compose-mode]'
+        
         challenge = cls.challenge_model(**mapped_data)
         
         # Set initial value
@@ -161,6 +166,8 @@ class ContainerChallengeType(BaseChallenge):
             "initial": challenge.container_initial,
             "minimum": challenge.container_minimum,
             "decay": challenge.container_decay,
+            # Compose config
+            "compose_config": challenge.compose_config or "",
         }
         return data
     
@@ -412,6 +419,29 @@ def load(app: Flask):
     
     # Create database tables
     app.db.create_all()
+    
+    # Inline migration for multi-container support
+    from sqlalchemy import inspect as sa_inspect, text
+    inspector = sa_inspect(db.engine)
+    
+    # Add compose_config to challenges table
+    if 'challenges' in inspector.get_table_names():
+        existing_cols = {col['name'] for col in inspector.get_columns('challenges')}
+        if 'compose_config' not in existing_cols:
+            with db.engine.begin() as conn:
+                conn.execute(text('ALTER TABLE challenges ADD COLUMN compose_config TEXT DEFAULT ""'))
+                logger.info('Migration: added compose_config column to challenges')
+    
+    # Add container_ids, network_id to container_instances table
+    if 'container_instances' in inspector.get_table_names():
+        existing_cols = {col['name'] for col in inspector.get_columns('container_instances')}
+        with db.engine.begin() as conn:
+            if 'container_ids' not in existing_cols:
+                conn.execute(text('ALTER TABLE container_instances ADD COLUMN container_ids JSON'))
+                logger.info('Migration: added container_ids column to container_instances')
+            if 'network_id' not in existing_cols:
+                conn.execute(text('ALTER TABLE container_instances ADD COLUMN network_id VARCHAR(64)'))
+                logger.info('Migration: added network_id column to container_instances')
     
     # Initialize default config
     _initialize_default_config()

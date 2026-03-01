@@ -390,3 +390,179 @@ class DockerService:
             # Often fails if network is in use, which is expected during race conditions
             logger.warning(f"Failed to remove network {name} (might be in use): {e}")
             return False
+
+    def create_container_group(
+        self,
+        containers_config: list,
+        network_name: str,
+        entry_port: int,
+        host_port: int,
+        flag: str,
+        labels: Dict[str, str] = None,
+        name_prefix: str = '',
+        memory_limit: str = '512m',
+        cpu_limit: float = 0.5,
+        pids_limit: int = 100,
+        tailnet_container: str = 'tailscale-challenges',
+    ) -> Dict[str, Any]:
+        """
+        Create a group of containers with a private network (compose-like).
+        Entry container shares network with tailscale-challenges AND private network.
+        Other containers only connect to private network.
+        """
+        if not self.is_connected():
+            raise Exception("Docker is not connected")
+        
+        created_containers = []
+        network = None
+        
+        try:
+            # 1. Create private bridge network
+            network = self.client.networks.create(
+                name=network_name,
+                driver='bridge',
+                labels={
+                    'ctfd.managed': 'true',
+                    'ctfd.compose_group': name_prefix,
+                    **(labels or {})
+                }
+            )
+            logger.info(f"Created private network: {network_name}")
+            
+            cpu_period = 100000
+            cpu_quota = int(cpu_limit * cpu_period)
+            
+            # 2. Find entry container (the one with 'expose')
+            entry_idx = None
+            for i, c in enumerate(containers_config):
+                if c.get('expose'):
+                    entry_idx = i
+                    break
+            
+            if entry_idx is None:
+                raise Exception("No container has 'expose' defined. One container must expose a port.")
+            
+            # 3. Create non-entry containers first (on private network only)
+            for i, c_def in enumerate(containers_config):
+                if i == entry_idx:
+                    continue
+                
+                c_name = f"{name_prefix}_{c_def['name']}"
+                c_env = dict(c_def.get('environment', {}))
+                c_labels = dict(labels or {})
+                c_labels['ctfd.compose_role'] = 'internal'
+                c_labels['ctfd.compose_name'] = c_def['name']
+                
+                container = self.client.containers.run(
+                    image=c_def['image'],
+                    name=c_name,
+                    command=c_def.get('command'),
+                    detach=True,
+                    auto_remove=True,
+                    environment=c_env,
+                    mem_limit=memory_limit,
+                    cpu_quota=cpu_quota,
+                    cpu_period=cpu_period,
+                    pids_limit=pids_limit,
+                    labels=c_labels,
+                    network=network_name,
+                    cap_drop=['ALL'],
+                    cap_add=['CHOWN', 'SETUID', 'SETGID'],
+                    security_opt=['no-new-privileges'],
+                )
+                created_containers.append(container)
+                logger.info(f"Created internal container: {c_name} ({container.id[:12]})")
+            
+            # 4. Create entry container with tailnet network
+            entry_def = containers_config[entry_idx]
+            entry_name = f"{name_prefix}_{entry_def['name']}"
+            entry_env = dict(entry_def.get('environment', {}))
+            entry_env['FLAG'] = flag
+            entry_env['PORT'] = str(host_port)
+            
+            entry_labels = dict(labels or {})
+            entry_labels['ctfd.compose_role'] = 'entry'
+            entry_labels['ctfd.compose_name'] = entry_def['name']
+            
+            entry_container = self.client.containers.run(
+                image=entry_def['image'],
+                name=entry_name,
+                command=entry_def.get('command'),
+                detach=True,
+                auto_remove=True,
+                environment=entry_env,
+                mem_limit=memory_limit,
+                cpu_quota=cpu_quota,
+                cpu_period=cpu_period,
+                pids_limit=pids_limit,
+                labels=entry_labels,
+                network_mode=f'container:{tailnet_container}',
+                cap_drop=['ALL'],
+                cap_add=['CHOWN', 'SETUID', 'SETGID'],
+                security_opt=['no-new-privileges'],
+            )
+            created_containers.append(entry_container)
+            logger.info(f"Created entry container: {entry_name} ({entry_container.id[:12]})")
+            
+            # 5. Connect entry container to private network too
+            network.connect(entry_container, aliases=[entry_def['name']])
+            logger.info(f"Connected entry container to private network with alias '{entry_def['name']}'")
+            
+            all_ids = [c.id for c in created_containers]
+            
+            return {
+                'container_ids': all_ids,
+                'entry_container_id': entry_container.id,
+                'network_id': network.id,
+                'port': host_port,
+            }
+            
+        except Exception as e:
+            logger.error(f"Error creating container group: {e}")
+            for c in created_containers:
+                try:
+                    c.stop(timeout=3)
+                    c.remove()
+                except:
+                    pass
+            if network:
+                try:
+                    network.remove()
+                except:
+                    pass
+            raise
+    
+    def stop_container_group(self, container_ids: list, network_id: str = None) -> bool:
+        """
+        Stop all containers in a group and remove the private network.
+        """
+        if not self.is_connected():
+            logger.warning("Docker not connected, cannot stop container group")
+            return False
+        
+        success = True
+        
+        for cid in (container_ids or []):
+            try:
+                container = self.client.containers.get(cid)
+                container.stop(timeout=3)
+                container.remove()
+                logger.info(f"Stopped container {cid[:12]}")
+            except docker.errors.NotFound:
+                logger.info(f"Container {cid[:12]} not found (already removed)")
+            except Exception as e:
+                logger.error(f"Error stopping container {cid[:12]}: {e}")
+                success = False
+        
+        if network_id:
+            try:
+                network = self.client.networks.get(network_id)
+                network.remove()
+                logger.info(f"Removed private network {network_id[:12]}")
+            except docker.errors.NotFound:
+                pass
+            except Exception as e:
+                logger.warning(f"Failed to remove network {network_id[:12]}: {e}")
+                success = False
+        
+        return success

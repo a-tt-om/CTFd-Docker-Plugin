@@ -23,6 +23,10 @@ class ContainerChallenge(Challenges):
     internal_ports = db.Column(db.Text, default="")  # Comma separated list of ports: "80,22"
     command = db.Column(db.Text, default="")
     
+    # Multi-container (compose) configuration - YAML format
+    # When set, 'image' is ignored and containers are created from this config
+    compose_config = db.Column(db.Text, default="")
+    
     # Connection info for users
     container_connection_type = db.Column(
         db.String(20), 

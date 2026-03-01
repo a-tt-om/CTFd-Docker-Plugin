@@ -129,12 +129,10 @@ class ContainerService:
     
     def _provision_container(self, instance: ContainerInstance, challenge: ContainerChallenge, flag: str):
         """
-        Provision Docker container
+        Provision Docker container(s)
         
-        Args:
-            instance: ContainerInstance object
-            challenge: ContainerChallenge object
-            flag: Plain text flag
+        Supports both single-container and multi-container (compose) mode.
+        Multi-container mode is triggered when challenge.compose_config is set.
         """
         import uuid as uuid_module
         
@@ -143,6 +141,10 @@ class ContainerService:
         db.session.commit()
         
         try:
+            # Check for multi-container (compose) mode
+            if challenge.compose_config and challenge.compose_config.strip():
+                self._provision_compose(instance, challenge, flag)
+                return
             # Get config
             from ..models.config import ContainerConfig
             
@@ -428,6 +430,127 @@ class ContainerService:
             db.session.commit()
             raise
     
+    def _provision_compose(self, instance: ContainerInstance, challenge: ContainerChallenge, flag: str):
+        """
+        Provision multi-container group from compose_config YAML.
+        
+        Creates a private Docker network, spawns all containers,
+        and connects the entry container to tailscale-challenges.
+        """
+        import yaml
+        import re
+        
+        try:
+            config = yaml.safe_load(challenge.compose_config)
+            containers_list = config.get('containers', [])
+            
+            if not containers_list:
+                raise Exception("compose_config has no 'containers' defined")
+            
+            # Find entry container (the one with 'expose')
+            entry_def = None
+            for c in containers_list:
+                if c.get('expose'):
+                    entry_def = c
+                    break
+            
+            if entry_def is None:
+                raise Exception("No container has 'expose'. One container must expose a port.")
+            
+            entry_port = int(entry_def['expose'])
+            
+            # Allocate port for tailnet
+            host_port = self.port_manager.allocate_port()
+            
+            # Get config
+            from ..models.config import ContainerConfig
+            connection_host = ContainerConfig.get('connection_host', 'localhost')
+            
+            # Generate names
+            safe_name = re.sub(r'[^a-zA-Z0-9-]', '', challenge.name.replace(' ', '-').lower())
+            name_prefix = f"{safe_name}_{instance.account_id}"
+            network_name = f"ctfd-compose-{instance.uuid[:12]}"
+            
+            # Labels for all containers
+            labels = {
+                'ctfd.instance_uuid': instance.uuid,
+                'ctfd.challenge_id': str(challenge.id),
+                'ctfd.account_id': str(instance.account_id),
+                'ctfd.expires_at': str(instance.expires_at.timestamp()),
+                'ctfd.managed': 'true',
+                'ctfd.plugin': 'containers',
+            }
+            
+            # Create container group
+            result = self.docker.create_container_group(
+                containers_config=containers_list,
+                network_name=network_name,
+                entry_port=entry_port,
+                host_port=host_port,
+                flag=flag,
+                labels=labels,
+                name_prefix=name_prefix,
+                memory_limit=challenge.get_memory_limit(),
+                cpu_limit=challenge.get_cpu_limit(),
+                pids_limit=challenge.pids_limit,
+                tailnet_container=TAILNET_CONTAINER,
+            )
+            
+            # Update instance
+            instance.container_id = result['entry_container_id']
+            instance.container_ids = result['container_ids']
+            instance.network_id = result['network_id']
+            instance.connection_port = host_port
+            instance.connection_ports = {str(entry_port): host_port}
+            instance.connection_host = connection_host
+            instance.connection_info = {
+                'type': challenge.container_connection_type or 'http',
+                'info': challenge.container_connection_info,
+                'compose': True,
+                'containers': len(containers_list),
+            }
+            instance.status = 'running'
+            instance.started_at = datetime.utcnow()
+            
+            db.session.commit()
+            
+            # Schedule Redis expiration
+            try:
+                from .. import redis_expiration_service
+                if redis_expiration_service:
+                    expires_in = int((instance.expires_at - datetime.utcnow()).total_seconds())
+                    redis_expiration_service.schedule_expiration(instance.uuid, expires_in)
+            except Exception as e:
+                logger.warning(f"Failed to schedule Redis expiration: {e}")
+            
+            logger.info(
+                f"Provisioned compose group for instance {instance.uuid}: "
+                f"{len(containers_list)} containers, network={network_name}, port={host_port}"
+            )
+            
+            # Audit log
+            self._create_audit_log(
+                'instance_started',
+                instance_id=instance.id,
+                challenge_id=challenge.id,
+                account_id=instance.account_id,
+                details={
+                    'compose': True,
+                    'containers': len(containers_list),
+                    'network': network_name,
+                    'port': host_port,
+                }
+            )
+            
+        except Exception as e:
+            logger.error(f"Error provisioning compose group: {e}")
+            if self.notification_service:
+                self.notification_service.notify_error("Compose Provisioning", str(e))
+            instance.status = 'error'
+            instance.extra_data = {'error': str(e)}
+            db.session.commit()
+            raise
+    
     def renew_instance(self, instance: ContainerInstance, user_id: int) -> ContainerInstance:
         """
         Renew (extend) container expiration
@@ -508,8 +631,12 @@ class ContainerService:
             logger.warning(f"Failed to cancel Redis expiration: {e}")
         
         try:
-            # Stop Docker container
-            if instance.container_id:
+            # Stop Docker container(s)
+            if instance.container_ids:
+                # Multi-container mode: stop all containers + remove network
+                self.docker.stop_container_group(instance.container_ids, instance.network_id)
+            elif instance.container_id:
+                # Single-container mode
                 self.docker.stop_container(instance.container_id)
             
             # Release port back to pool

@@ -37,7 +37,9 @@ class ContainerInstance(db.Model):
     account_id = db.Column(db.Integer, nullable=False, index=True)
     
     # Docker container info
-    container_id = db.Column(db.String(64), index=True)  # Docker container ID
+    container_id = db.Column(db.String(64), index=True)  # Docker container ID (entry container)
+    container_ids = db.Column(db.JSON)  # All container IDs for multi-container: ["id1", "id2"]
+    network_id = db.Column(db.String(64))  # Private Docker network ID for multi-container
     
     # Connection info
     connection_host = db.Column(db.String(255))  # Host to connect (IP/hostname)
