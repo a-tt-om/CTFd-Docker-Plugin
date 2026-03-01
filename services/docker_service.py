@@ -454,67 +454,74 @@ class DockerService:
             if entry_idx is None:
                 raise Exception("No container has 'expose' defined. One container must expose a port.")
             
-            # 3. Create non-entry containers (on private network only)
+            # 3. CREATE all containers (not started yet) with aliases
+            #    Using low-level API so aliases are set BEFORE any process runs
+            container_ids = []
+            entry_container_id = None
+            
             for i, c_def in enumerate(containers_config):
-                if i == entry_idx:
-                    continue
-                
+                is_entry = (i == entry_idx)
                 c_name = f"{name_prefix}-{c_def['name']}"
+                
+                # Build environment
                 c_env = dict(c_def.get('environment', {}))
+                if is_entry:
+                    c_env['FLAG'] = flag
+                    c_env['PORT'] = str(entry_port)
+                env_list = [f"{k}={v}" for k, v in c_env.items()]
+                
+                # Build labels
                 c_labels = dict(labels or {})
-                c_labels['ctfd.compose_role'] = 'internal'
+                c_labels['ctfd.compose_role'] = 'entry' if is_entry else 'internal'
                 c_labels['ctfd.compose_name'] = c_def['name']
                 
-                container = self.client.containers.run(
-                    image=c_def['image'],
-                    name=c_name,
-                    command=c_def.get('command'),
-                    detach=True,
-                    auto_remove=True,
-                    environment=c_env,
+                # Host config (resource limits)
+                host_config = self.client.api.create_host_config(
                     mem_limit=memory_limit,
                     cpu_quota=cpu_quota,
                     cpu_period=cpu_period,
                     pids_limit=pids_limit,
-                    labels=c_labels,
-                    network=network_name,
+                    auto_remove=True,
                 )
-                # Add DNS alias (e.g. "web", "db") so other containers can find it by YAML name
-                network.disconnect(container)
-                network.connect(container, aliases=[c_def['name']])
-                created_containers.append(container)
-                logger.info(f"Created internal container: {c_name} alias={c_def['name']} ({container.id[:12]})")
+                
+                # Network config with alias = YAML name (e.g. "web", "mysql", "waf")
+                net_config = self.client.api.create_networking_config({
+                    network_name: self.client.api.create_endpoint_config(
+                        aliases=[c_def['name']]
+                    )
+                })
+                
+                # CREATE container (not started)
+                result = self.client.api.create_container(
+                    image=c_def['image'],
+                    name=c_name,
+                    command=c_def.get('command'),
+                    environment=env_list,
+                    labels=c_labels,
+                    host_config=host_config,
+                    networking_config=net_config,
+                )
+                cid = result['Id']
+                container_ids.append(cid)
+                if is_entry:
+                    entry_container_id = cid
+                logger.info(f"Created container: {c_name} alias={c_def['name']} ({cid[:12]}) [not started]")
             
-            # 4. Create entry container on private network (NO port mapping)
-            entry_def = containers_config[entry_idx]
-            entry_name = f"{name_prefix}-{entry_def['name']}"
-            entry_env = dict(entry_def.get('environment', {}))
-            entry_env['FLAG'] = flag
-            entry_env['PORT'] = str(entry_port)
+            # 4. START all containers (aliases already set on network)
+            #    Start internal containers first, entry container last
+            for cid in container_ids:
+                if cid != entry_container_id:
+                    self.client.api.start(cid)
+                    logger.info(f"Started internal container {cid[:12]}")
             
-            entry_labels = dict(labels or {})
-            entry_labels['ctfd.compose_role'] = 'entry'
-            entry_labels['ctfd.compose_name'] = entry_def['name']
+            # Start entry container last (backends already running)
+            self.client.api.start(entry_container_id)
+            logger.info(f"Started entry container {entry_container_id[:12]}")
             
-            entry_container = self.client.containers.run(
-                image=entry_def['image'],
-                name=entry_name,
-                command=entry_def.get('command'),
-                detach=True,
-                auto_remove=True,
-                environment=entry_env,
-                mem_limit=memory_limit,
-                cpu_quota=cpu_quota,
-                cpu_period=cpu_period,
-                pids_limit=pids_limit,
-                labels=entry_labels,
-                network=network_name,
-            )
-            # Add DNS alias
-            network.disconnect(entry_container)
-            network.connect(entry_container, aliases=[entry_def['name']])
-            created_containers.append(entry_container)
-            logger.info(f"Created entry container: {entry_name} alias={entry_def['name']} ({entry_container.id[:12]})")
+            # Convert to high-level objects for tracking
+            created_containers = [self.client.containers.get(cid) for cid in container_ids]
+            entry_container = self.client.containers.get(entry_container_id)
+            entry_name = f"{name_prefix}-{containers_config[entry_idx]['name']}"
             
             # 5. Connect tailscale-challenges to the private bridge network
             ts_container = self.client.containers.get(tailnet_container)
@@ -556,11 +563,11 @@ class DockerService:
                     network.disconnect(ts_container)
                 except:
                     pass
-            # Stop containers
-            for c in created_containers:
+            # Stop containers (use container_ids from low-level API)
+            for cid in container_ids:
                 try:
-                    c.stop(timeout=3)
-                    c.remove()
+                    self.client.api.stop(cid, timeout=3)
+                    self.client.api.remove_container(cid, force=True)
                 except:
                     pass
             if network:
