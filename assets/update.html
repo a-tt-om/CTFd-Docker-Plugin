@@ -25,16 +25,7 @@
   <select class="form-control" id="scoring_type" name="scoring_type">
     <option
       value="standard"
-      {%
-      if
-      challenge.type=""
-      ="standard"
-      or
-      not
-      challenge.container_decay
-      %}selected{%
-      endif
-      %}
+      {% if challenge.type == "standard" or not challenge.container_decay %}selected{% endif %}
     >
       Standard (Fixed Points)
     </option>
