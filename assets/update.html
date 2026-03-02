@@ -127,28 +127,13 @@
     <select class="form-control" name="decay_function" id="decay_function">
       <option
         value="linear"
-        {%
-        if
-        challenge.decay_function=""
-        ="linear"
-        or
-        not
-        challenge.decay_function
-        %}selected{%
-        endif
-        %}
+        {% if challenge.decay_function == "linear" or not challenge.decay_function %}selected{% endif %}
       >
         Linear
       </option>
       <option
         value="logarithmic"
-        {%
-        if
-        challenge.decay_function=""
-        ="logarithmic"
-        %}selected{%
-        endif
-        %}
+        {% if challenge.decay_function == "logarithmic" %}selected{% endif %}
       >
         Logarithmic
       </option>
