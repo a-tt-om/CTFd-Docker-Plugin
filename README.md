@@ -5,37 +5,43 @@ A comprehensive CTFd plugin that enables dynamic Docker container challenges wit
 ## Features
 
 ### Container Management
+
 - **Dynamic Container Spawning**: Each team/user gets their own isolated Docker container
 - **Automatic Lifecycle Management**: Containers auto-expire after configurable timeout
 - **Resource Control**: Global limits for CPU, memory, and process count
 - **Port Management**: Automatic port allocation and mapping
 - **Custom Naming**: Containers named as `challengename_accountid` for easy identification
 - **Subdomain routing**: Generate subdomain for each WEB challenge. Read more [here](./SUBDOMAIN_INFO.md)
-
+- **Container Compose Mode**: Multi-container challenges with private networking and DNS aliases
 
 ### Anti-Cheat System
+
 - **Flag Reuse Detection**: Automatically detects when teams share flags
 - **Instant Ban**: Both flag owner and submitter get banned immediately
 - **Audit Logging**: Complete trail of all container and flag activities
 - **Cheat Dashboard**: Admin view of all detected cheating attempts
 
 ### Scoring Options
+
 - **Standard Scoring**: Fixed points per challenge
 - **Dynamic Scoring**: Points decay as more teams solve
   - Linear decay: `value = initial - (decay × solves)`
   - Logarithmic decay: Parabolic curve with minimum floor
 
 ### Flag Generation
+
 - **Static Flags**: Same flag for all teams (e.g., `CTF{static_flag}`)
 - **Random Flags**: Unique per-team flags with pattern (e.g., `CTF{this_is_the_flag_<ran_8>}` -> `CTF{this_is_the_flag_xxxxxxxx}`)
 - **Automatic Preview**: Real-time flag pattern preview during challenge creation
 
 ### Bulk Import
+
 - **CSV Import**: Import multiple challenges at once
 - **Format Validation**: Automatic parsing and error reporting
 - **Progress Tracking**: Real-time feedback during import
 
 ### Performance
+
 - **Redis-Based Expiration**: Precise container killing (0-second accuracy)
 - **Efficient Port Management**: Thread-safe port allocation
 - **Database Optimization**: Indexed queries for fast lookups
@@ -51,18 +57,20 @@ Remember to rename the extracted folder to `containers`.
 ![](./image-readme/install.png)
 
 2. **Configure Docker socket access:** (Only for local docker)
+
 ```yaml
 # In docker-compose.yml
-  ctfd:
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+ctfd:
+  volumes:
+    - /var/run/docker.sock:/var/run/docker.sock
 ```
 
 3. **Enable Redis keyspace notifications:**
+
 ```yaml
 # In docker-compose.yml
-   cache:
-      command: redis-server --notify-keyspace-events Ex --appendonly yes
+cache:
+  command: redis-server --notify-keyspace-events Ex --appendonly yes
 ```
 
 ## Security Considerations
@@ -72,18 +80,21 @@ Remember to rename the extracted folder to `containers`.
 **DO NOT host challenges on the same domain as your CTFd platform.**
 
 #### Vulnerable Configuration ❌
+
 ```
 CTFd Platform:        ctf.example.com
 Challenge Containers: ctf.example.com:30000, ctf.example.com:30001, etc.
 ```
 
 **Why this is dangerous:**
+
 - Browsers send cookies to ALL ports on the same domain
 - If any challenge has an RCE vulnerability, attacker controls that port
 - Attacker can steal CTFd session cookies from victims who visit the malicious challenge
 - Result: Complete account takeover via session hijacking
 
 #### Secure Configuration ✅
+
 ```
 CTFd Platform:        ctf.example.com
 Challenge Containers: challenges.example.com:30000  (separate subdomain)
@@ -92,6 +103,7 @@ Challenge Containers: challenges.example.com:30000  (separate subdomain)
 ```
 
 **Why this is secure:**
+
 - Cookies are NOT shared between different domains/subdomains
 - Even with RCE, attacker cannot access CTFd session cookies
 - Users remain protected from session hijacking
@@ -101,20 +113,25 @@ Challenge Containers: challenges.example.com:30000  (separate subdomain)
 This plugin implements a **Hybrid Network Isolation** strategy to balance security and functionality:
 
 1.  **Host:Port Challenges (Web/TCP)**:
-    *   **Network**: `ctfd-isolated`
-    *   **Isolation**: **Strict** (`com.docker.network.bridge.enable_icc=false`)
-    *   **Effect**: Containers are isolated at Layer 2. They cannot communicate with each other (no ping, no connect). They can still access the internet via the gateway.
+    - **Network**: `ctfd-isolated`
+    - **Isolation**: **Strict** (`com.docker.network.bridge.enable_icc=false`)
+    - **Effect**: Containers are isolated at Layer 2. They cannot communicate with each other (no ping, no connect). They can still access the internet via the gateway.
 
 2.  **Subdomain Routing (Only affect Web Challenges)**:
-    *   **Network**: `ctfd-challenges` (or configured value)
-    *   **Isolation**: **Standard** (`enable_icc=true`)
-    *   **Effect**: Web challenge containers share a network to allow the Traefik reverse proxy to route traffic. Sibling isolation is *not* enforced at the Docker network level (Traefik requirement).
+    - **Network**: `ctfd-challenges` (or configured value)
+    - **Isolation**: **Standard** (`enable_icc=true`)
+    - **Effect**: Web challenge containers share a network to allow the Traefik reverse proxy to route traffic. Sibling isolation is _not_ enforced at the Docker network level (Traefik requirement).
 
-3.  **Infrastructure Protection**:
-    *   The CTFd main container is NOT attached to `ctfd-isolated`.
-    *   It generally should not be attached to `ctfd-challenges` either (except for specific specialized setups, but `internal` network is preferred for DB access).
-    *   Challenge containers cannot access the CTFd database or Redis directly.
-    
+3.  **Container Compose Mode**:
+    - **Network**: Per-instance private bridge (`ctfd-compose-<uuid>`)
+    - **Isolation**: Each instance gets its own bridge. Containers within a group can communicate via DNS aliases. Different instances are fully isolated from each other.
+    - **Access**: Exposed exclusively via Tailscale (`tailscale serve --tcp`). No host port mapping.
+
+4.  **Infrastructure Protection**:
+    - The CTFd main container is NOT attached to `ctfd-isolated`.
+    - It generally should not be attached to `ctfd-challenges` either (except for specific specialized setups, but `internal` network is preferred for DB access).
+    - Challenge containers cannot access the CTFd database or Redis directly.
+
 ## Configuration
 
 Access admin panel: **Admin → Plugin → Containers → Settings**
@@ -122,10 +139,11 @@ Access admin panel: **Admin → Plugin → Containers → Settings**
 ![](./image-readme/settings.png)
 
 ### Global Settings
-- **Docker Connection Type**: 
-   - Local Docker: Auto connect with `unix://var/run/docker.sock` (must be add volumes at step 1 on Installation section)
-   - Remote SSH: set hostname, port, user, key and add the target server public key to know hosts file  
-   ![](./image-readme/sshconfig.png)
+
+- **Docker Connection Type**:
+  - Local Docker: Auto connect with `unix://var/run/docker.sock` (must be add volumes at step 1 on Installation section)
+  - Remote SSH: set hostname, port, user, key and add the target server public key to know hosts file  
+    ![](./image-readme/sshconfig.png)
 - **Connection Hostname**: **CRITICAL - Set to separate domain/IP** (see Security above)
 - **Container Timeout**: Minutes before auto-expiration (default: 60)
 - **Max Renewals**: How many times users can extend (default: 3)
@@ -137,7 +155,8 @@ Access admin panel: **Admin → Plugin → Containers → Settings**
 
 ## Creating Challenges
 
-### Via Admin UI
+### Single Container Mode (Via Admin UI)
+
 ![alt text](./image-readme/create.png)
 
 1. **Go to:** Admin → Challenges → Create Challenge → Container
@@ -149,17 +168,134 @@ Access admin panel: **Admin → Plugin → Containers → Settings**
    - **Image**: Docker image with tag (e.g., `nginx:latest`, `ubuntu:20.04`)
    - **Internal Port**: Port exposed inside container
    - **Command**: Optional startup command
-![alt text](./image-readme/docker.png)
+     ![alt text](./image-readme/docker.png)
 
 4. **Set Flag Pattern:**
    - Static: `CTF{my_static_flag}`
    - Random: `CTF{prefix_<ran_16>_suffix}`: `<ran_N>` generates N random characters
-![](./image-readme/flag.png)
+     ![](./image-readme/flag.png)
 
 5. **Choose Scoring:**
    - **Standard**: Fixed points
    - **Dynamic**: Initial value, decay rate, minimum value, decay function
-![alt text](./image-readme/score.png)
+     ![alt text](./image-readme/score.png)
+
+### Container Compose Mode (Multi-Container Challenges)
+
+![alt text](./image-readme/create_compose.png)
+
+For challenges that require multiple services, use the **Container Compose** challenge type.
+
+#### Prerequisites
+
+- **Tailscale container** named `tailscale-challenges` must be running and connected to the tailnet
+- **Docker images** must be pre-built on the host (the plugin does NOT build images)
+- **Environment variable** `TAILNET_CONTAINER` can be set to customize the Tailscale container name (default: `tailscale-challenges`)
+
+#### How It Works
+
+```
+1. Player clicks "Fetch Instance"
+2. Plugin creates a private bridge network (ctfd-compose-<uuid>)
+3. All containers are CREATED with DNS aliases
+4. Internal containers START first
+5. Entry container STARTS last
+6. tailscale-challenges connects to the bridge
+7. tailscale serve --tcp <port> tcp://<entry>:<port>
+8. Player receives: challenges.ts.bksec.vn:<port>
+```
+
+```
+Internet → PUBLIC_IP:30000     ❌ Nothing listening (no host port mapping)
+Tailnet  → 100.64.0.1:30000   ✅ tailscale serve → entry → internal containers
+```
+
+#### Creating a Compose Challenge
+
+1. **Go to:** Admin → Challenges → Create Challenge → **Container Compose**
+2. **Fill in:** Name, Category, Description
+   ![alt text](./image-readme/image.png)
+3. **Write Compose YAML** in the configuration textarea
+   ![alt text](./image-readme/image1.png)
+4. **Set Flag Pattern & Scoring** as usual
+   ![alt text](./image-readme/image2.png)
+5. Click **Finish**
+   ![alt text](./image-readme/image3.png)
+
+#### YAML Format
+
+```yaml
+containers:
+  - name: waf # DNS alias on the private bridge network
+    image: my-challenge-waf:latest # Docker image (must exist on host)
+    expose: 8080 # Entry point port — only ONE container has this
+    environment: # Optional env vars
+      PHP_BACKEND: "http://web:80" # Reference other containers by their 'name'
+
+  - name: web # This becomes hostname "web" on the network
+    image: my-challenge-web:latest
+    environment:
+      MYSQL_DATABASE: mydb
+      MYSQL_USER: myuser
+      MYSQL_PASSWORD: mypass
+
+  - name: mysql # Must match what the app code connects to
+    image: my-challenge-db:latest
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: mydb
+      MYSQL_USER: myuser
+      MYSQL_PASSWORD: mypass
+    command: "--character-set-server=latin1" # Optional CMD override
+```
+
+#### YAML Field Reference
+
+| Field         | Required       | Description                                                             |
+| ------------- | -------------- | ----------------------------------------------------------------------- |
+| `name`        | ✅ Yes         | DNS alias on the bridge network. Other containers use this as hostname. |
+| `image`       | ✅ Yes         | Docker image with tag. Must be pre-built on the host.                   |
+| `expose`      | ⚠️ Exactly one | Port to expose via Tailscale. Only ONE container must have this.        |
+| `environment` | ❌ Optional    | Key-value pairs passed as environment variables.                        |
+| `command`     | ❌ Optional    | Override the container's default CMD.                                   |
+
+#### ⚠️ Important Notes
+
+1. **`name` = DNS hostname**: The `name` field becomes a DNS alias on the private bridge. If your application code connects to hostname `mysql`, then the container `name` MUST be `mysql` — not `db` or anything else.
+
+2. **`expose` on exactly one container**: The container with `expose` is the entry point that players access. Typically a WAF or reverse proxy. All other containers are internal-only.
+
+3. **`FLAG` and `PORT` auto-injected**: The entry container automatically receives `FLAG=<generated_flag>` and `PORT=<expose_value>` as environment variables. You do NOT need to specify them in the YAML.
+
+4. **Startup order matters**: Internal containers (without `expose`) start FIRST. The entry container starts LAST. This ensures backends (database, web server) are ready before the proxy/WAF starts forwarding.
+
+5. **Multi-instance isolation**: Each player gets their own private bridge network. DNS aliases (e.g., `web`, `mysql`) are scoped per-network — they never conflict between different players' instances.
+
+6. **Images must be pre-built**: Run `docker build` or `docker compose build` on the host before creating the challenge. The plugin only references images by name, it does not build them.
+
+7. **Port allocation**: Ports are allocated from the configured range (default: 30000+). Each instance gets a unique port.
+
+**What happens when a player fetches an instance:**
+
+```
+1. Private network created: ctfd-compose-7919342a-828
+2. Containers created (not started): new-year-new-cal-1-waf, new-year-new-cal-1-web, new-year-new-cal-1-mysql
+3. DNS aliases set: waf, web, mysql
+4. mysql started → web started → waf started
+5. tailscale-challenges connected to bridge
+6. tailscale serve --tcp 30000 tcp://new-year-new-cal-1-waf:8080
+7. Player sees: http://challenges.ts.bksec.vn:30000/
+```
+
+**When terminated:**
+
+```
+1. tailscale serve --tcp 30000 off
+2. Containers stopped and removed
+3. tailscale-challenges disconnected from bridge
+4. Network deleted
+5. Port 30000 released back to pool
+```
 
 ### Via CSV Import
 
@@ -218,6 +354,7 @@ Access: **Admin → Containers → Instances**
 ![alt text](./image-readme/instances.png)
 
 ### Features
+
 - **Real-time Status**: Running containers
 - **Auto-Reload**: Dashboard refreshes every 15 seconds
 - **Manual Refresh**: Button to force immediate update
@@ -235,6 +372,7 @@ Access: **Admin → Containers → Instances**
 Access: **Admin → Containers → Cheat Logs**
 
 Shows all detected flag-sharing attempts with:
+
 - Timestamp
 - Challenge name
 - Flag hash
@@ -244,11 +382,10 @@ Shows all detected flag-sharing attempts with:
 
 ## Roadmap
 
-- [x] Support multiple port mapping per image  
+- [x] Support multiple port mapping per image
 - [x] Discord webhook notifications
-- [ ] Support docker compose file for challenge creation
+- [x] Support docker compose file for challenge creation (Container Compose mode)
 
 ## License
 
 See LICENSE file.
-
