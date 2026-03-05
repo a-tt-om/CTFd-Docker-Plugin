@@ -2,6 +2,7 @@
 Port Manager - Manage port allocation
 """
 import logging
+import random
 from CTFd.models import db
 from ..models.config import ContainerConfig
 
@@ -114,42 +115,42 @@ class PortManager:
 
     def allocate_port(self) -> int:
         """
-        Allocate next available port with Redis locking
+        Allocate a random available port with Redis locking
         """
         start, end = self._get_port_range()
         used_ports = self._get_used_ports()
         
-        # Try to find available port
-        for port in range(start, end + 1):
-            if port not in used_ports:
-                # Try to claim with Redis
-                if self.lock_port(port):
-                    logger.info(f"Allocated port {port}")
-                    return port
+        # Shuffle port range for unpredictable allocation
+        candidates = [p for p in range(start, end + 1) if p not in used_ports]
+        random.shuffle(candidates)
+        
+        for port in candidates:
+            if self.lock_port(port):
+                logger.info(f"Allocated port {port}")
+                return port
         
         raise Exception(f"No available ports in range {start}-{end}")
 
     def allocate_ports(self, count: int) -> list:
         """
-        Allocate multiple available ports with Redis locking
+        Allocate multiple random available ports with Redis locking
         """
         start, end = self._get_port_range()
         used_ports = self._get_used_ports()
         allocated = []
         
-        # Try to find available ports
-        for port in range(start, end + 1):
-            if port not in used_ports:
-                if self.lock_port(port):
-                    allocated.append(port)
-                    if len(allocated) == count:
-                        logger.info(f"Allocated ports {allocated}")
-                        return allocated
+        # Shuffle port range for unpredictable allocation
+        candidates = [p for p in range(start, end + 1) if p not in used_ports]
+        random.shuffle(candidates)
         
-        # Release if we couldn't get enough
-        # (Though current implementation relies on TTL expiry)
+        for port in candidates:
+            if self.lock_port(port):
+                allocated.append(port)
+                if len(allocated) == count:
+                    logger.info(f"Allocated ports {allocated}")
+                    return allocated
+        
         raise Exception(f"Not enough available ports in range {start}-{end}")
-    
     def release_port(self, port: int):
         """Release port lock"""
         logger.info(f"Released port {port}")

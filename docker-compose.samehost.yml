@@ -25,7 +25,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
-      - DOCKER_API_VERSION=1.45  # Force older API
+      - DOCKER_API_VERSION=1.45 # Force older API
     networks:
       - default
       - ctfd-challenges
@@ -53,8 +53,8 @@ services:
     depends_on:
       - db
     networks:
-        default:
-        internal:
+      default:
+      internal:
 
   db:
     image: mariadb:10.11
@@ -68,17 +68,24 @@ services:
     volumes:
       - .data/mysql:/var/lib/mysql
     networks:
-        internal:
+      internal:
     # This command is required to set important mariadb defaults
-    command: [mysqld, --character-set-server=utf8mb4, --collation-server=utf8mb4_unicode_ci, --wait_timeout=28800, --log-warnings=0]
+    command:
+      [
+        mysqld,
+        --character-set-server=utf8mb4,
+        --collation-server=utf8mb4_unicode_ci,
+        --wait_timeout=28800,
+        --log-warnings=0,
+      ]
 
   cache:
     image: redis:4
     restart: always
     volumes:
-    - .data/redis:/data
+      - .data/redis:/data
     networks:
-        internal:
+      internal:
     command: redis-server --notify-keyspace-events Ex --appendonly yes
 
   adminer:
@@ -96,10 +103,9 @@ services:
       - default
 
 networks:
-    default:
-    internal:
-        internal: true
-    ctfd-challenges:
-        name: ctfd-challenges
-        internal: false
-
+  default:
+  internal:
+    internal: true
+  ctfd-challenges:
+    name: ctfd-challenges
+    internal: false

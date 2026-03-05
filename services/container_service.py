@@ -17,9 +17,6 @@ from .port_manager import PortManager
 
 logger = logging.getLogger(__name__)
 
-# Hardcoded: challenge containers share network with this tailscale container
-# so they are only accessible via the tailnet
-TAILNET_CONTAINER = 'tailscale-challenges'
 
 
 def _slugify(text: str) -> str:
@@ -341,22 +338,22 @@ class ContainerService:
                             use_traefik=True
                         )
                     else:
-                        # TAILNET MODE: share network with tailscale-challenges
-                        # Ports are NOT bound to host — only accessible via tailnet
-                        # PORT env tells the challenge which port to listen on (avoids conflict)
+                        # PORT BINDING MODE: bind ports directly on host
+                        # Using connection_host as bind_ip restricts access to that IP only
+                        # (e.g. tailscale IP = only tailnet users can reach the port)
                         result = self.docker.create_container(
                             image=challenge.image,
                             internal_port=challenge.internal_port,
                             host_port=host_port,
                             ports=ports_map,
                             command=command,
-                            environment={'FLAG': flag, 'PORT': str(host_port)},
+                            environment={'FLAG': flag},
                             memory_limit=challenge.get_memory_limit(),
                             cpu_limit=challenge.get_cpu_limit(),
                             pids_limit=challenge.pids_limit,
                             name=container_name,
                             labels=labels,
-                            network_mode=f'container:{TAILNET_CONTAINER}'
+                            bind_ip=connection_host,
                         )
                     
                     # 5. Update instance
@@ -488,10 +485,8 @@ class ContainerService:
         """
         Provision multi-container group from compose_config YAML.
 
-        Supports two routing modes:
-        - Tailscale mode (default): allocates a port and routes traffic via tailscale serve.
-        - Traefik mode: no port allocated; Traefik container joins the per-instance bridge and
-          routes traffic using labels attached to the containers.
+        Uses Traefik for routing: containers are tagged with Traefik labels,
+        and the Traefik container is connected to the per-instance bridge network.
 
         Traefik mode is activated when the YAML has `traefik: true` at the top level, OR when
         any container's labels contain `traefik.enable: "true"`.
@@ -586,7 +581,6 @@ class ContainerService:
                     cpu_limit=challenge.get_cpu_limit(),
                     pids_limit=challenge.pids_limit,
                     connection_host=connection_host,
-                    tailnet_container=TAILNET_CONTAINER,
                     traefik_container=traefik_container,
                 )
 
@@ -622,49 +616,11 @@ class ContainerService:
                 host_port = None
 
             else:
-                # --- Tailscale path ---
-                # Find entry container
-                entry_def = None
-                for c in containers_list:
-                    if c.get('expose'):
-                        entry_def = c
-                        break
-
-                if entry_def is None:
-                    raise Exception("No container has 'expose'. One container must expose a port.")
-
-                entry_port = int(entry_def['expose'])
-
-                # Allocate port for tailnet
-                host_port = self.port_manager.allocate_port()
-
-                result = self.docker.create_container_group(
-                    containers_config=containers_list,
-                    network_name=network_name,
-                    entry_port=entry_port,
-                    host_port=host_port,
-                    flag=flag,
-                    labels=labels,
-                    name_prefix=name_prefix,
-                    memory_limit=challenge.get_memory_limit(),
-                    cpu_limit=challenge.get_cpu_limit(),
-                    pids_limit=challenge.pids_limit,
-                    connection_host=connection_host,
-                    tailnet_container=TAILNET_CONTAINER,
+                raise Exception(
+                    "Compose mode requires Traefik labels. "
+                    "Add 'traefik.enable: true' to at least one container's labels "
+                    "or set 'traefik: true' at the top level of compose_config."
                 )
-
-                instance.container_id = result['entry_container_id']
-                instance.container_ids = result['container_ids']
-                instance.network_id = result['network_id']
-                instance.connection_port = host_port
-                instance.connection_ports = {str(entry_port): host_port}
-                instance.connection_host = connection_host
-                instance.connection_info = {
-                    'type': challenge.container_connection_type or 'http',
-                    'info': challenge.container_connection_info,
-                    'compose': True,
-                    'containers': len(containers_list),
-                }
 
             instance.status = 'running'
             instance.started_at = datetime.utcnow()
@@ -799,7 +755,6 @@ class ContainerService:
                     instance.container_ids,
                     instance.network_id,
                     host_port=instance.connection_port,
-                    tailnet_container=TAILNET_CONTAINER,
                     traefik_container=traefik_container,
                 )
             elif instance.container_id:

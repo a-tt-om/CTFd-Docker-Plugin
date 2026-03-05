@@ -74,7 +74,8 @@ class DockerService:
         name: str = None,
         network: str = None,  # Network to connect for Traefik routing
         use_traefik: bool = False,  # If True, don't expose host port (Traefik handles routing)
-        network_mode: str = None  # Share network with another container (e.g. 'container:tailscale-challenges')
+        network_mode: str = None,  # Share network with another container (e.g. 'container:tailscale-challenges')
+        bind_ip: str = None,  # Bind ports only on this IP (e.g. tailscale IP for restricted access)
     ) -> Dict[str, Any]:
         """
         Create and start a container
@@ -95,6 +96,8 @@ class DockerService:
             network_mode: If set, share network stack with another container.
                          Cannot be used together with 'network' or 'ports'.
                          Example: 'container:tailscale-challenges'
+            bind_ip: If set, bind ports only on this IP (e.g. '100.64.0.5').
+                    Uses Docker format (bind_ip, port) so ports are not exposed on 0.0.0.0.
         
         Returns:
             {
@@ -144,13 +147,19 @@ class DockerService:
                 ports_config = None
                 if not use_traefik:
                     if ports:
-                        # New multi-port mode: ports = {'80': 30001, '22': 30002}
+                        # Multi-port mode: ports = {'80': 30001, '22': 30002}
                         ports_config = {}
                         for internal, external in ports.items():
-                            ports_config[f'{internal}/tcp'] = external
+                            if bind_ip:
+                                ports_config[f'{internal}/tcp'] = (bind_ip, external)
+                            else:
+                                ports_config[f'{internal}/tcp'] = external
                     else:
                         # Legacy single port mode
-                        ports_config = {f'{internal_port}/tcp': host_port}
+                        if bind_ip:
+                            ports_config = {f'{internal_port}/tcp': (bind_ip, host_port)}
+                        else:
+                            ports_config = {f'{internal_port}/tcp': host_port}
                 
                 # Network configuration
                 network_arg = network if network else 'bridge'
@@ -404,30 +413,25 @@ class DockerService:
         cpu_limit: float = 0.5,
         pids_limit: int = 100,
         connection_host: str = 'localhost',
-        tailnet_container: str = 'tailscale-challenges',
         traefik_container: str = None,
     ) -> Dict[str, Any]:
         """
         Create a group of containers with a private network (compose-like).
-        
+
         All containers connect to a private bridge network for inter-container DNS.
-        Entry container is exposed via tailscale serve — no host port mapping needed.
-        
+        Traefik container is connected to the bridge to route traffic via labels.
+
         Flow:
         1. Create private bridge network
         2. Create all containers on bridge
-        3. Connect tailscale-challenges to the bridge
-        4. Run 'tailscale serve --bg --tcp PORT tcp://entry:port' inside tailscale-challenges
-        
-        Result: challenges.ts.bksec.vn:PORT → entry container (tailnet only, no public exposure)
+        3. Connect Traefik to the bridge (if traefik_container is set)
         """
         if not self.is_connected():
             raise Exception("Docker is not connected")
         
         created_containers = []
         network = None
-        ts_connected = False
-        ts_serve_port = None
+        traefik_connected = False
         
         try:
             # 1. Create private bridge network
@@ -528,26 +532,11 @@ class DockerService:
             entry_name = f"{name_prefix}-{containers_config[entry_idx]['name']}"
             
             if traefik_container:
-                # 5. Traefik mode: connect Traefik to the private bridge so it can route traffic
+                # Connect Traefik to the private bridge so it can route traffic
                 traefik = self.client.containers.get(traefik_container)
                 network.connect(traefik)
-                ts_connected = True  # reuse flag for cleanup tracking
+                traefik_connected = True
                 logger.info(f"Connected Traefik container '{traefik_container}' to {network_name}")
-            else:
-                # 5. Connect tailscale-challenges to the private bridge network
-                ts_container = self.client.containers.get(tailnet_container)
-                network.connect(ts_container)
-                ts_connected = True
-                logger.info(f"Connected {tailnet_container} to {network_name}")
-
-                # 6. Set up tailscale serve to forward tailnet traffic to entry container
-                serve_cmd = f'tailscale serve --bg --tcp {host_port} tcp://{entry_name}:{entry_port}'
-                exit_code, output = ts_container.exec_run(serve_cmd)
-                if exit_code != 0:
-                    raise Exception(f"tailscale serve failed (exit {exit_code}): {output.decode()}")
-                ts_serve_port = host_port
-                logger.info(f"Tailscale serve: port {host_port} -> {entry_name}:{entry_port}")
-                logger.info(f"Output: {output.decode().strip()}")
             
             all_ids = [c.id for c in created_containers]
             
@@ -560,25 +549,14 @@ class DockerService:
             
         except Exception as e:
             logger.error(f"Error creating container group: {e}")
-            # Cleanup tailscale serve (only in non-traefik mode)
-            if ts_serve_port and not traefik_container:
+            # Disconnect Traefik from network
+            if traefik_connected and network and traefik_container:
                 try:
-                    ts_container = self.client.containers.get(tailnet_container)
-                    ts_container.exec_run(f'tailscale serve --tcp {ts_serve_port} off')
+                    traefik = self.client.containers.get(traefik_container)
+                    network.disconnect(traefik)
                 except:
                     pass
-            # Disconnect from network
-            if ts_connected and network:
-                try:
-                    if traefik_container:
-                        traefik = self.client.containers.get(traefik_container)
-                        network.disconnect(traefik)
-                    else:
-                        ts_container = self.client.containers.get(tailnet_container)
-                        network.disconnect(ts_container)
-                except:
-                    pass
-            # Stop containers (use container_ids from low-level API)
+            # Stop containers
             for cid in container_ids:
                 try:
                     self.client.api.stop(cid, timeout=3)
@@ -597,14 +575,10 @@ class DockerService:
         container_ids: list,
         network_id: str = None,
         host_port: int = None,
-        tailnet_container: str = 'tailscale-challenges',
         traefik_container: str = None,
     ) -> bool:
         """
-        Stop all containers in a group, clean up tailscale/Traefik, and remove the private network.
-
-        In Traefik mode (traefik_container set): skips tailscale serve cleanup and disconnects
-        the Traefik container from the bridge instead.
+        Stop all containers in a group, disconnect Traefik, and remove the private network.
         """
         if not self.is_connected():
             logger.warning("Docker not connected, cannot stop container group")
@@ -612,18 +586,7 @@ class DockerService:
 
         success = True
 
-        # 1. Remove tailscale serve forwarding (non-traefik mode only)
-        if host_port and not traefik_container:
-            try:
-                ts_container = self.client.containers.get(tailnet_container)
-                ts_container.exec_run(f'tailscale serve --tcp {host_port} off')
-                logger.info(f"Removed tailscale serve for port {host_port}")
-            except docker.errors.NotFound:
-                logger.warning(f"Tailscale container {tailnet_container} not found")
-            except Exception as e:
-                logger.warning(f"Error removing tailscale serve: {e}")
-
-        # 2. Stop containers
+        # 1. Stop containers
         for cid in (container_ids or []):
             try:
                 container = self.client.containers.get(cid)
@@ -636,22 +599,17 @@ class DockerService:
                 logger.error(f"Error stopping container {cid[:12]}: {e}")
                 success = False
 
-        # 3. Disconnect from network & remove network
+        # 2. Disconnect Traefik & remove network
         if network_id:
             try:
                 network = self.client.networks.get(network_id)
-                # Disconnect whichever container was connected to this bridge
-                try:
-                    if traefik_container:
+                if traefik_container:
+                    try:
                         traefik = self.client.containers.get(traefik_container)
                         network.disconnect(traefik)
                         logger.info(f"Disconnected Traefik '{traefik_container}' from network {network_id[:12]}")
-                    else:
-                        ts_container = self.client.containers.get(tailnet_container)
-                        network.disconnect(ts_container)
-                        logger.info(f"Disconnected {tailnet_container} from network {network_id[:12]}")
-                except:
-                    pass
+                    except:
+                        pass
                 network.remove()
                 logger.info(f"Removed private network {network_id[:12]}")
             except docker.errors.NotFound:
