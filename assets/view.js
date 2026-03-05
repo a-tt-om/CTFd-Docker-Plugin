@@ -405,6 +405,16 @@ function container_stop(challenge_id) {
 })();
 
 function renderConnectionInfo(connection, parent) {
+    // Traefik compose mode: show the URL directly from the router rule
+    if (connection.traefik_url) {
+        let link = document.createElement('a');
+        link.href = connection.traefik_url;
+        link.textContent = connection.traefik_url;
+        link.target = '_blank';
+        parent.append(link);
+        return;
+    }
+
     // Prioritize URL List (Multi-port Subdomain)
     if (connection.type == "url_list" && connection.urls) {
         connection.urls.forEach(function (item) {

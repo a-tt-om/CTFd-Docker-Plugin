@@ -302,6 +302,29 @@
 		</div>
 	</div>
 
+	<div class="card mt-3">
+		<div class="card-header">
+			<h5><i class="fas fa-route"></i> Compose Challenge Traefik Routing</h5>
+		</div>
+		<div class="card-body">
+			<div class="alert alert-info">
+				<i class="fas fa-info-circle"></i>
+				When a compose challenge's YAML contains <code>traefik.enable: "true"</code> labels on any
+				container, the plugin automatically connects the Traefik container to the per-instance bridge
+				network so Traefik can route HTTP/HTTPS traffic. No port allocation or tailscale is used.
+			</div>
+
+			<div class="form-group">
+				<label for="traefik_container">Traefik Container Name</label>
+				<input class="form-control" type="text" name="traefik_container" id="traefik_container"
+					placeholder="traefik" value="{{ settings.traefik_container }}">
+				<small class="form-text text-muted">
+					Name or ID of the running Traefik Docker container. Default: <code>traefik</code>.
+				</small>
+			</div>
+		</div>
+	</div>
+
 	<div class="form-group mt-3">
 		<button type="submit" class="btn btn-primary">
 			<i class="fas fa-check-circle"></i> Save Settings

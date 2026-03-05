@@ -13,6 +13,8 @@ A comprehensive CTFd plugin that enables dynamic Docker container challenges wit
 - **Custom Naming**: Containers named as `challengename_accountid` for easy identification
 - **Subdomain routing**: Generate subdomain for each WEB challenge. Read more [here](./SUBDOMAIN_INFO.md)
 - **Container Compose Mode**: Multi-container challenges with private networking and DNS aliases
+- **Traefik Routing for Compose**: Compose challenges can route via Traefik instead of Tailscale — no port allocation needed
+- **Label Placeholder Substitution**: Dynamic Traefik labels with `{uuid}`, `{instance_name}`, `{account_id}`, etc.
 
 ### Anti-Cheat System
 
@@ -125,7 +127,8 @@ This plugin implements a **Hybrid Network Isolation** strategy to balance securi
 3.  **Container Compose Mode**:
     - **Network**: Per-instance private bridge (`ctfd-compose-<uuid>`)
     - **Isolation**: Each instance gets its own bridge. Containers within a group can communicate via DNS aliases. Different instances are fully isolated from each other.
-    - **Access**: Exposed exclusively via Tailscale (`tailscale serve --tcp`). No host port mapping.
+    - **Access (Tailscale mode)**: Exposed via `tailscale serve --tcp`. No host port mapping.
+    - **Access (Traefik mode)**: Traefik container joins the per-instance bridge. No port allocation or Tailscale required. Activated automatically when any container has `traefik.enable: "true"` labels, or when the YAML has `traefik: true` at the top level.
 
 4.  **Infrastructure Protection**:
     - The CTFd main container is NOT attached to `ctfd-isolated`.
@@ -152,6 +155,7 @@ Access admin panel: **Admin → Plugin → Containers → Settings**
   - Memory: Default `512m`
   - CPU: Default `0.5` cores
   - PIDs: Default `100` processes
+- **Traefik Container Name**: Name or ID of the running Traefik Docker container used for compose challenge routing (default: `traefik`)
 
 ## Creating Challenges
 
@@ -188,11 +192,59 @@ For challenges that require multiple services, use the **Container Compose** cha
 
 #### Prerequisites
 
-- **Tailscale container** named `tailscale-challenges` must be running and connected to the tailnet
 - **Docker images** must be pre-built on the host (the plugin does NOT build images)
-- **Environment variable** `TAILNET_CONTAINER` can be set to customize the Tailscale container name (default: `tailscale-challenges`)
+- **Tailscale mode** (default): A container named `tailscale-challenges` must be running and connected to the tailnet
+- **Traefik mode**: A running Traefik container (name configured in Settings → Traefik Container Name, default: `traefik`). You must start Traefik **before** creating any Traefik-mode compose challenges.
+
+  Minimal `docker-compose.yml` to run Traefik alongside a test challenge:
+
+  ```yaml
+  services:
+    traefik:
+      image: traefik:v3.3
+      container_name: traefik          # must match admin setting (default: "traefik")
+      command:
+        - --providers.docker=true
+        - --providers.docker.exposedbydefault=false
+        - --entrypoints.web.address=:80
+        - --api.dashboard=true
+        - --api.insecure=true          # dashboard on :8080, remove in prod
+      ports:
+        - "80:80"
+        - "8081:8080"
+      volumes:
+        - /var/run/docker.sock:/var/run/docker.sock:ro
+      restart: unless-stopped
+
+    test-web:
+      image: python:3-alpine
+      container_name: test-web
+      command: python3 /app/test-web.py
+      volumes:
+        - ./test-web.py:/app/test-web.py:ro
+      labels:
+        - traefik.enable=true
+        - traefik.http.routers.test-web.rule=Host(`test-web.ttv.bksec.vn`)
+        - traefik.http.routers.test-web.entrypoints=web
+        - traefik.http.services.test-web.loadbalancer.server.port=80
+      restart: unless-stopped
+
+    test-tcp:
+      image: python:3-alpine
+      container_name: test-tcp
+      command: python3 /app/test-tcp.py
+      volumes:
+        - ./test-tcp.py:/app/test-tcp.py:ro
+      ports:
+        - "30001:1337"
+      restart: unless-stopped
+  ```
+
+  > **Note:** `test-web` and `test-tcp` are example challenge containers for testing; they are not required for the plugin to work. The important service is `traefik`.
 
 #### How It Works
+
+**Tailscale mode** (default — `expose` required, no Traefik labels):
 
 ```
 1. Player clicks "Fetch Instance"
@@ -210,6 +262,24 @@ Internet → PUBLIC_IP:30000     ❌ Nothing listening (no host port mapping)
 Tailnet  → 100.64.0.1:30000   ✅ tailscale serve → entry → internal containers
 ```
 
+**Traefik mode** (activated by `traefik: true` or `traefik.enable: "true"` labels):
+
+```
+1. Player clicks "Fetch Instance"
+2. Plugin creates a private bridge network (ctfd-compose-<uuid>)
+3. Label placeholders resolved: {uuid}, {instance_name}, {account_id}, etc.
+4. All containers started with their Traefik labels applied
+5. Traefik container connects to the per-instance bridge
+6. Traefik routes HTTP/HTTPS traffic to the challenge container
+7. Player receives: https://<instance_name>.challenges.example.com/
+```
+
+```
+Internet → Traefik :443  ✅ Host rule matches → per-instance bridge → container
+Port pool              ❌ Not used (no port allocation)
+Tailscale              ❌ Not used
+```
+
 #### Creating a Compose Challenge
 
 1. **Go to:** Admin → Challenges → Create Challenge → **Container Compose**
@@ -223,6 +293,8 @@ Tailnet  → 100.64.0.1:30000   ✅ tailscale serve → entry → internal conta
    ![alt text](./image-readme/image3.png)
 
 #### YAML Format
+
+**Tailscale mode example:**
 
 ```yaml
 containers:
@@ -249,23 +321,74 @@ containers:
     command: "--character-set-server=latin1" # Optional CMD override
 ```
 
+**Traefik mode example:**
+
+```yaml
+traefik: true  # OR omit and rely on traefik.enable label below
+
+containers:
+  - name: app
+    image: my-challenge-app:latest
+    expose: 80  # Still needed so FLAG/PORT env vars are injected
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.{uuid}-app.rule: "Host(`{instance_name}.challenges.example.com`)"
+      traefik.http.routers.{uuid}-app.entrypoints: "websecure"
+      traefik.http.routers.{uuid}-app.tls: "true"
+      traefik.http.services.{uuid}-app.loadbalancer.server.port: "80"
+
+  - name: db
+    image: my-challenge-db:latest
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+```
+
 #### YAML Field Reference
 
-| Field         | Required       | Description                                                             |
-| ------------- | -------------- | ----------------------------------------------------------------------- |
-| `name`        | ✅ Yes         | DNS alias on the bridge network. Other containers use this as hostname. |
-| `image`       | ✅ Yes         | Docker image with tag. Must be pre-built on the host.                   |
-| `expose`      | ⚠️ Exactly one | Port to expose via Tailscale. Only ONE container must have this.        |
-| `environment` | ❌ Optional    | Key-value pairs passed as environment variables.                        |
-| `command`     | ❌ Optional    | Override the container's default CMD.                                   |
+**Top-level fields:**
+
+| Field      | Required    | Description                                                                      |
+| ---------- | ----------- | -------------------------------------------------------------------------------- |
+| `traefik`  | ❌ Optional | Set to `true` to force Traefik mode regardless of individual container labels.   |
+| `containers` | ✅ Yes    | List of container definitions (see below).                                       |
+
+**Per-container fields:**
+
+| Field         | Required          | Description                                                                         |
+| ------------- | ----------------- | ----------------------------------------------------------------------------------- |
+| `name`        | ✅ Yes            | DNS alias on the bridge network. Other containers use this as hostname.             |
+| `image`       | ✅ Yes            | Docker image with tag. Must be pre-built on the host.                               |
+| `expose`      | ⚠️ Exactly one    | Port for the entry container. Required in Tailscale mode; optional in Traefik mode (used only for `FLAG`/`PORT` injection). |
+| `environment` | ❌ Optional       | Key-value pairs passed as environment variables.                                    |
+| `command`     | ❌ Optional       | Override the container's default CMD.                                               |
+| `labels`      | ❌ Optional       | Docker labels (required for Traefik routing). Placeholders are substituted (see below). |
+
+#### Label Placeholders
+
+The following placeholders are substituted in label **keys and values** before containers are created:
+
+| Placeholder       | Substituted with                                                              |
+| ----------------- | ----------------------------------------------------------------------------- |
+| `{uuid}`          | First 8 characters of the instance UUID                                       |
+| `{full_uuid}`     | Full instance UUID                                                            |
+| `{account_id}`    | Numeric account/team ID                                                       |
+| `{challenge_id}`  | Numeric challenge ID                                                          |
+| `{instance_name}` | Smart prefix built from the account name + challenge slug + `{uuid}` (see below) |
+
+**`{instance_name}` generation:**
+
+The plugin builds a URL-safe instance name in this priority order:
+1. **Student/employee ID**: extracts 6+ consecutive digits from the account name (e.g. `Nguyen Van A - 20301111` → `20301111-challenge-name-a1b2c3d4`)
+2. **Slugified name**: normalizes unicode, lowercases, replaces separators with hyphens (e.g. `Đoàn Văn Sáng` → `doan-van-sang-challenge-name-a1b2c3d4`), capped at 32 chars
+3. **Fallback**: `user-<account_id>-challenge-name-a1b2c3d4`
 
 #### ⚠️ Important Notes
 
 1. **`name` = DNS hostname**: The `name` field becomes a DNS alias on the private bridge. If your application code connects to hostname `mysql`, then the container `name` MUST be `mysql` — not `db` or anything else.
 
-2. **`expose` on exactly one container**: The container with `expose` is the entry point that players access. Typically a WAF or reverse proxy. All other containers are internal-only.
+2. **`expose` on exactly one container**: In Tailscale mode this is required — the container with `expose` is the entry point players access. In Traefik mode it is optional; it is used only to inject `FLAG`/`PORT` env vars into the correct container.
 
-3. **`FLAG` and `PORT` auto-injected**: The entry container automatically receives `FLAG=<generated_flag>` and `PORT=<expose_value>` as environment variables. You do NOT need to specify them in the YAML.
+3. **`FLAG` and `PORT` auto-injected**: The entry container (the one with `expose`) automatically receives `FLAG=<generated_flag>` and `PORT=<expose_value>` as environment variables. You do NOT need to specify them in the YAML.
 
 4. **Startup order matters**: Internal containers (without `expose`) start FIRST. The entry container starts LAST. This ensures backends (database, web server) are ready before the proxy/WAF starts forwarding.
 
@@ -273,7 +396,9 @@ containers:
 
 6. **Images must be pre-built**: Run `docker build` or `docker compose build` on the host before creating the challenge. The plugin only references images by name, it does not build them.
 
-7. **Port allocation**: Ports are allocated from the configured range (default: 30000+). Each instance gets a unique port.
+7. **Port allocation**: In Tailscale mode, ports are allocated from the configured range (default: 30000+). In Traefik mode, no port is allocated.
+
+8. **Traefik URL display**: In Traefik mode the player's connection panel shows a clickable link extracted from the `Host(...)` rule in the container labels. The scheme is `https` if any `websecure` entrypoint label is present, otherwise `http`.
 
 **What happens when a player fetches an instance:**
 
@@ -287,7 +412,7 @@ containers:
 7. Player sees: http://challenges.ts.bksec.vn:30000/
 ```
 
-**When terminated:**
+**When terminated (Tailscale mode):**
 
 ```
 1. tailscale serve --tcp 30000 off
@@ -295,6 +420,15 @@ containers:
 3. tailscale-challenges disconnected from bridge
 4. Network deleted
 5. Port 30000 released back to pool
+```
+
+**When terminated (Traefik mode):**
+
+```
+1. Containers stopped and removed
+2. Traefik disconnected from bridge
+3. Network deleted
+(no port release needed)
 ```
 
 ### Via CSV Import
@@ -385,6 +519,8 @@ Shows all detected flag-sharing attempts with:
 - [x] Support multiple port mapping per image
 - [x] Discord webhook notifications
 - [x] Support docker compose file for challenge creation (Container Compose mode)
+- [x] Traefik routing mode for compose challenges (no port allocation, label-based routing)
+- [x] Dynamic label placeholder substitution (`{uuid}`, `{instance_name}`, etc.)
 
 ## License
 

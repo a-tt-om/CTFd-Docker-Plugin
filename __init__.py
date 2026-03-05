@@ -101,11 +101,17 @@ class ContainerChallengeType(BaseChallenge):
         # Create challenge with mapped data
         challenge = cls.challenge_model(**mapped_data)
         
-        # Set initial value
-        if 'container_initial' in mapped_data:
-            challenge.value = mapped_data['container_initial']
-        elif 'initial' in data:
-            challenge.value = data['initial']
+        # Set challenge.value — standard scoring ('value' field) wins over dynamic ('initial')
+        if mapped_data.get('value', '') not in ('', None):
+            try:
+                challenge.value = int(mapped_data['value'])
+            except (ValueError, TypeError):
+                pass
+        elif 'container_initial' in mapped_data and mapped_data['container_initial'] not in ('', None):
+            try:
+                challenge.value = int(mapped_data['container_initial'])
+            except (ValueError, TypeError):
+                pass
         
         db.session.add(challenge)
         db.session.commit()
@@ -216,8 +222,16 @@ class ContainerChallengeType(BaseChallenge):
             
             setattr(challenge, db_attr, value)
         
-        # Set initial value
-        if 'initial' in data or 'container_initial' in data:
+        # Set challenge.value:
+        # - Standard scoring: 'value' field submitted, 'initial' disabled → use 'value'
+        # - Dynamic scoring:  'initial' field submitted, 'value' disabled → use container_initial
+        # Check 'value' first so standard scoring always wins even if JS didn't disable 'initial'
+        if data.get('value', '') not in ('', None):
+            try:
+                challenge.value = int(data['value'])
+            except (ValueError, TypeError):
+                pass
+        elif 'initial' in data and data.get('initial', '') not in ('', None):
             challenge.value = challenge.container_initial
         
         # Ensure dummy flag exists to prevent "Missing Flags" warning
@@ -612,6 +626,7 @@ def _initialize_default_config():
         'max_renewals': '3',
         'max_memory': '512m',
         'max_cpu': '0.5',
+        'traefik_container': 'traefik',
     }
     
     for key, value in defaults.items():

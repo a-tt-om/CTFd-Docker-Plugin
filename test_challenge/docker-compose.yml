@@ -1,0 +1,28 @@
+# Local test only — mirrors what the CTFd plugin does at challenge start.
+# Usage:
+#   cd test_challenge
+#   docker-compose up --build
+#   Open http://localhost:5000
+#
+# Exploit:
+#   http://localhost:5000/ping?host=; curl http://target/flag.txt
+
+version: '3.8'
+
+services:
+  web:
+    build: ./web
+    ports:
+      - "5000:5000"
+    networks:
+      - internal
+
+  target:
+    build: ./target
+    networks:
+      - internal
+    # NOT exposed to host — only reachable from web via http://target/flag.txt
+
+networks:
+  internal:
+    driver: bridge

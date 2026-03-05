@@ -405,6 +405,7 @@ class DockerService:
         pids_limit: int = 100,
         connection_host: str = 'localhost',
         tailnet_container: str = 'tailscale-challenges',
+        traefik_container: str = None,
     ) -> Dict[str, Any]:
         """
         Create a group of containers with a private network (compose-like).
@@ -470,10 +471,13 @@ class DockerService:
                     c_env['PORT'] = str(entry_port)
                 env_list = [f"{k}={v}" for k, v in c_env.items()]
                 
-                # Build labels
+                # Build labels: start with instance-level labels, then per-container YAML labels
                 c_labels = dict(labels or {})
                 c_labels['ctfd.compose_role'] = 'entry' if is_entry else 'internal'
                 c_labels['ctfd.compose_name'] = c_def['name']
+                # Merge any labels defined in the container's YAML definition
+                if c_def.get('labels'):
+                    c_labels.update(c_def['labels'])
                 
                 # Host config (resource limits)
                 host_config = self.client.api.create_host_config(
@@ -523,20 +527,27 @@ class DockerService:
             entry_container = self.client.containers.get(entry_container_id)
             entry_name = f"{name_prefix}-{containers_config[entry_idx]['name']}"
             
-            # 5. Connect tailscale-challenges to the private bridge network
-            ts_container = self.client.containers.get(tailnet_container)
-            network.connect(ts_container)
-            ts_connected = True
-            logger.info(f"Connected {tailnet_container} to {network_name}")
-            
-            # 6. Set up tailscale serve to forward tailnet traffic to entry container
-            serve_cmd = f'tailscale serve --bg --tcp {host_port} tcp://{entry_name}:{entry_port}'
-            exit_code, output = ts_container.exec_run(serve_cmd)
-            if exit_code != 0:
-                raise Exception(f"tailscale serve failed (exit {exit_code}): {output.decode()}")
-            ts_serve_port = host_port
-            logger.info(f"Tailscale serve: port {host_port} -> {entry_name}:{entry_port}")
-            logger.info(f"Output: {output.decode().strip()}")
+            if traefik_container:
+                # 5. Traefik mode: connect Traefik to the private bridge so it can route traffic
+                traefik = self.client.containers.get(traefik_container)
+                network.connect(traefik)
+                ts_connected = True  # reuse flag for cleanup tracking
+                logger.info(f"Connected Traefik container '{traefik_container}' to {network_name}")
+            else:
+                # 5. Connect tailscale-challenges to the private bridge network
+                ts_container = self.client.containers.get(tailnet_container)
+                network.connect(ts_container)
+                ts_connected = True
+                logger.info(f"Connected {tailnet_container} to {network_name}")
+
+                # 6. Set up tailscale serve to forward tailnet traffic to entry container
+                serve_cmd = f'tailscale serve --bg --tcp {host_port} tcp://{entry_name}:{entry_port}'
+                exit_code, output = ts_container.exec_run(serve_cmd)
+                if exit_code != 0:
+                    raise Exception(f"tailscale serve failed (exit {exit_code}): {output.decode()}")
+                ts_serve_port = host_port
+                logger.info(f"Tailscale serve: port {host_port} -> {entry_name}:{entry_port}")
+                logger.info(f"Output: {output.decode().strip()}")
             
             all_ids = [c.id for c in created_containers]
             
@@ -549,18 +560,22 @@ class DockerService:
             
         except Exception as e:
             logger.error(f"Error creating container group: {e}")
-            # Cleanup tailscale serve
-            if ts_serve_port:
+            # Cleanup tailscale serve (only in non-traefik mode)
+            if ts_serve_port and not traefik_container:
                 try:
                     ts_container = self.client.containers.get(tailnet_container)
                     ts_container.exec_run(f'tailscale serve --tcp {ts_serve_port} off')
                 except:
                     pass
-            # Disconnect tailscale from network
+            # Disconnect from network
             if ts_connected and network:
                 try:
-                    ts_container = self.client.containers.get(tailnet_container)
-                    network.disconnect(ts_container)
+                    if traefik_container:
+                        traefik = self.client.containers.get(traefik_container)
+                        network.disconnect(traefik)
+                    else:
+                        ts_container = self.client.containers.get(tailnet_container)
+                        network.disconnect(ts_container)
                 except:
                     pass
             # Stop containers (use container_ids from low-level API)
@@ -578,23 +593,27 @@ class DockerService:
             raise
     
     def stop_container_group(
-        self, 
-        container_ids: list, 
+        self,
+        container_ids: list,
         network_id: str = None,
         host_port: int = None,
         tailnet_container: str = 'tailscale-challenges',
+        traefik_container: str = None,
     ) -> bool:
         """
-        Stop all containers in a group, clean up tailscale serve, and remove the private network.
+        Stop all containers in a group, clean up tailscale/Traefik, and remove the private network.
+
+        In Traefik mode (traefik_container set): skips tailscale serve cleanup and disconnects
+        the Traefik container from the bridge instead.
         """
         if not self.is_connected():
             logger.warning("Docker not connected, cannot stop container group")
             return False
-        
+
         success = True
-        
-        # 1. Remove tailscale serve forwarding
-        if host_port:
+
+        # 1. Remove tailscale serve forwarding (non-traefik mode only)
+        if host_port and not traefik_container:
             try:
                 ts_container = self.client.containers.get(tailnet_container)
                 ts_container.exec_run(f'tailscale serve --tcp {host_port} off')
@@ -603,7 +622,7 @@ class DockerService:
                 logger.warning(f"Tailscale container {tailnet_container} not found")
             except Exception as e:
                 logger.warning(f"Error removing tailscale serve: {e}")
-        
+
         # 2. Stop containers
         for cid in (container_ids or []):
             try:
@@ -616,16 +635,21 @@ class DockerService:
             except Exception as e:
                 logger.error(f"Error stopping container {cid[:12]}: {e}")
                 success = False
-        
-        # 3. Disconnect tailscale-challenges from network & remove network
+
+        # 3. Disconnect from network & remove network
         if network_id:
             try:
                 network = self.client.networks.get(network_id)
-                # Disconnect tailscale-challenges first
+                # Disconnect whichever container was connected to this bridge
                 try:
-                    ts_container = self.client.containers.get(tailnet_container)
-                    network.disconnect(ts_container)
-                    logger.info(f"Disconnected {tailnet_container} from network {network_id[:12]}")
+                    if traefik_container:
+                        traefik = self.client.containers.get(traefik_container)
+                        network.disconnect(traefik)
+                        logger.info(f"Disconnected Traefik '{traefik_container}' from network {network_id[:12]}")
+                    else:
+                        ts_container = self.client.containers.get(tailnet_container)
+                        network.disconnect(ts_container)
+                        logger.info(f"Disconnected {tailnet_container} from network {network_id[:12]}")
                 except:
                     pass
                 network.remove()
@@ -635,5 +659,5 @@ class DockerService:
             except Exception as e:
                 logger.warning(f"Failed to remove network {network_id[:12]}: {e}")
                 success = False
-        
+
         return success

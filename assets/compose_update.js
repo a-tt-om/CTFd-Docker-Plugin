@@ -41,47 +41,43 @@ document.addEventListener("DOMContentLoaded", function () {
   }
 });
 
-// Scoring toggle
-document.getElementById("scoring_type").addEventListener("change", function () {
-  const scoringType = this.value;
-  const standardSection = document.getElementById("standard-scoring");
-  const dynamicSection = document.getElementById("dynamic-scoring");
+// Scoring toggle — must run inside DOMContentLoaded so elements exist
+document.addEventListener("DOMContentLoaded", function () {
+  const scoringTypeEl = document.getElementById("scoring_type");
+  if (!scoringTypeEl) return;
 
-  if (scoringType === "standard") {
-    standardSection.style.display = "block";
-    dynamicSection.style.display = "none";
-    document.getElementById("standard_value").required = true;
-    document.getElementById("standard_value").disabled = false;
-    [
-      "dynamic_initial",
-      "dynamic_decay",
-      "dynamic_minimum",
-      "decay_function",
-    ].forEach((id) => {
-      const f = document.getElementById(id);
-      if (f) {
-        f.required = false;
-        f.disabled = true;
-      }
-    });
-  } else {
-    standardSection.style.display = "none";
-    dynamicSection.style.display = "block";
-    document.getElementById("standard_value").required = false;
-    document.getElementById("standard_value").disabled = true;
-    ["dynamic_initial", "dynamic_decay", "dynamic_minimum"].forEach((id) => {
-      const f = document.getElementById(id);
-      if (f) {
-        f.required = true;
-        f.disabled = false;
-      }
-    });
-    const df = document.getElementById("decay_function");
-    if (df) {
-      df.required = false;
-      df.disabled = false;
+  function applyScoringType(scoringType) {
+    const standardSection = document.getElementById("standard-scoring");
+    const dynamicSection = document.getElementById("dynamic-scoring");
+
+    if (scoringType === "standard") {
+      if (standardSection) standardSection.style.display = "block";
+      if (dynamicSection) dynamicSection.style.display = "none";
+      const sv = document.getElementById("standard_value");
+      if (sv) { sv.required = true; sv.disabled = false; }
+      ["dynamic_initial", "dynamic_decay", "dynamic_minimum", "decay_function"].forEach((id) => {
+        const f = document.getElementById(id);
+        if (f) { f.required = false; f.disabled = true; }
+      });
+    } else {
+      if (standardSection) standardSection.style.display = "none";
+      if (dynamicSection) dynamicSection.style.display = "block";
+      const sv = document.getElementById("standard_value");
+      if (sv) { sv.required = false; sv.disabled = true; }
+      ["dynamic_initial", "dynamic_decay", "dynamic_minimum"].forEach((id) => {
+        const f = document.getElementById(id);
+        if (f) { f.required = true; f.disabled = false; }
+      });
+      const df = document.getElementById("decay_function");
+      if (df) { df.required = false; df.disabled = false; }
     }
   }
+
+  scoringTypeEl.addEventListener("change", function () {
+    applyScoringType(this.value);
+  });
+  // Fire immediately to set correct disabled state on page load
+  applyScoringType(scoringTypeEl.value);
 });
 
 // Set connection type from challenge data

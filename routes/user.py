@@ -16,6 +16,23 @@ from ..models.challenge import ContainerChallenge
 
 user_bp = Blueprint('containers_user', __name__, url_prefix='/api/v1/containers')
 
+
+def _build_connection(instance):
+    """Build the connection dict from a ContainerInstance, including Traefik URL if applicable."""
+    info = instance.connection_info or {}
+    conn = {
+        'host': instance.connection_host,
+        'port': instance.connection_port,
+        'ports': instance.connection_ports,
+        'type': info.get('type', 'ssh'),
+        'info': info.get('info', ''),
+        'urls': info.get('urls'),
+    }
+    if info.get('traefik') and info.get('traefik_url'):
+        conn['traefik_url'] = info['traefik_url']
+    return conn
+
+
 # Global services (will be injected by plugin init)
 container_service = None
 flag_service = None
@@ -105,13 +122,7 @@ def request_container():
             return jsonify({
                 'status': 'existing',
                 'instance_uuid': existing.uuid,
-                'connection': {
-                    'host': existing.connection_host,
-                    'port': existing.connection_port,
-                    'type': existing.connection_info.get('type') if existing.connection_info else 'ssh',
-                    'info': existing.connection_info.get('info') if existing.connection_info else '',
-                    'urls': existing.connection_info.get('urls') if existing.connection_info else None
-                },
+                'connection': _build_connection(existing),
                 'expires_at': int(existing.expires_at.timestamp() * 1000),
                 'renewal_count': existing.renewal_count,
                 'max_renewals': challenge.get_max_renewals()
@@ -142,14 +153,7 @@ def request_container():
         return jsonify({
             'status': 'created',
             'instance_uuid': instance.uuid,
-            'connection': {
-                'host': instance.connection_host,
-                'port': instance.connection_port,
-                'ports': instance.connection_ports,
-                'type': instance.connection_info.get('type') if instance.connection_info else 'ssh',
-                'info': instance.connection_info.get('info') if instance.connection_info else '',
-                'urls': instance.connection_info.get('urls') if instance.connection_info else None
-            },
+            'connection': _build_connection(instance),
             'expires_at': int(instance.expires_at.timestamp() * 1000),
             'renewal_count': instance.renewal_count,
             'max_renewals': challenge.get_max_renewals()
@@ -194,14 +198,7 @@ def get_container_info(challenge_id):
         return jsonify({
             'status': instance.status,
             'instance_uuid': instance.uuid,
-            'connection': {
-                'host': instance.connection_host,
-                'port': instance.connection_port,
-                'ports': instance.connection_ports,
-                'type': instance.connection_info.get('type') if instance.connection_info else 'ssh',
-                'info': instance.connection_info.get('info') if instance.connection_info else '',
-                'urls': instance.connection_info.get('urls') if instance.connection_info else None
-            },
+            'connection': _build_connection(instance),
             'expires_at': int(instance.expires_at.timestamp() * 1000),
             'renewal_count': instance.renewal_count
         })

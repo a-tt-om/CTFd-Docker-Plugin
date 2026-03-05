@@ -1,0 +1,47 @@
+# Paste this YAML into the "Compose Config" field when creating the challenge in CTFd.
+#
+# Network topology:
+#   player  -->  [web:5000]  --internal bridge-->  [target:80]
+#
+# The web container has an intentional command injection bug in /ping?host=
+# Players exploit it to reach the internal 'target' container and read /flag.txt
+#
+# e.g.: /ping?host=; curl http://target/flag.txt
+
+# --- Example 1: Tailscale mode (default) ---
+# Uncomment this block and comment out Example 2 below to use tailscale routing.
+#
+# containers:
+#   - name: web
+#     image: ctf-test-web:latest   # build from test_challenge/web/
+#     expose: 5000                 # this is the entry — exposed to players
+#
+#   - name: target
+#     image: ctf-test-target:latest  # build from test_challenge/target/
+#     # no 'expose' → internal only, reachable as http://target/ from web container
+
+# --- Example 2: Traefik mode ---
+# Labels on the web container are detected automatically → no port allocated, no tailscale.
+# Traefik (container named 'traefik' by default, configurable via admin settings) joins the
+# per-instance bridge and routes traffic using the labels below.
+#
+# Available placeholders in label values (and keys):
+#   {instance_name} → <studentid_or_slug>-<challengeslug>-<uuid8>  ← recommended
+#   {uuid}          → first 8 chars of instance UUID
+#   {full_uuid}     → full instance UUID
+#   {account_id}    → team/user ID
+#   {challenge_id}  → challenge ID
+
+containers:
+  - name: web
+    image: ctf-test-web:latest
+    expose: 5000
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.ctfd-{instance_name}.rule: "Host(`{instance_name}.ttv.bksec.lab`)"
+      traefik.http.routers.ctfd-{instance_name}.entrypoints: "web"
+      traefik.http.services.ctfd-{instance_name}-svc.loadbalancer.server.port: "5000"
+
+  - name: target
+    image: ctf-test-target:latest
+    # no labels → internal only, reachable as http://target/ from web container

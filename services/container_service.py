@@ -2,6 +2,8 @@
 Container Service - Business logic for container lifecycle
 """
 import logging
+import re as _re_top
+import unicodedata
 from datetime import datetime, timedelta
 from flask import request
 from CTFd.models import db
@@ -18,6 +20,58 @@ logger = logging.getLogger(__name__)
 # Hardcoded: challenge containers share network with this tailscale container
 # so they are only accessible via the tailnet
 TAILNET_CONTAINER = 'tailscale-challenges'
+
+
+def _slugify(text: str) -> str:
+    """Normalize unicode, strip non-ASCII accents, lowercase, replace spaces/separators with hyphens."""
+    # Decompose unicode (e.g. 'Đ' → 'D' + combining stroke, 'á' → 'a' + combining acute)
+    nfkd = unicodedata.normalize('NFKD', text)
+    ascii_text = nfkd.encode('ascii', 'ignore').decode('ascii')
+    # Lowercase, replace whitespace and underscores with hyphens, strip non-alphanumeric
+    slug = _re_top.sub(r'[^a-z0-9]+', '-', ascii_text.lower()).strip('-')
+    return slug or 'user'
+
+
+def _extract_instance_prefix(account_id: int) -> str:
+    """
+    Build the per-instance subdomain prefix from the account name.
+
+    Strategy:
+      1. Look for a student/employee ID: a run of 6+ digits anywhere in the name,
+         commonly after ' - ' (e.g. 'Đoàn Văn Sáng - 20301111').
+      2. Fall back to slugifying the full account name.
+      3. Last resort: 'user-<account_id>'.
+    """
+    try:
+        mode = get_config('user_mode')
+        if mode == 'teams':
+            from CTFd.models import Teams
+            account = Teams.query.get(account_id)
+        else:
+            from CTFd.models import Users
+            account = Users.query.get(account_id)
+
+        if not account:
+            return f'user-{account_id}'
+
+        name = account.name or ''
+
+        # 1. Extract student ID: 6+ consecutive digits, preferring the segment after ' - '
+        #    e.g. "Đoàn Văn Sáng - 20301111"  →  "20301111"
+        #         "Nguyen Van A (2030xxx)"      →  "2030xxx"
+        parts = _re_top.split(r'\s*[-–—]\s*', name)
+        for part in reversed(parts):          # check right-side parts first
+            m = _re_top.search(r'\b(\d{6,})\b', part)
+            if m:
+                return m.group(1)
+
+        # 2. Slugify the full name
+        slug = _slugify(name)
+        # Cap at 32 chars to keep subdomains reasonable
+        return slug[:32].strip('-') or f'user-{account_id}'
+
+    except Exception:
+        return f'user-{account_id}'
 
 
 class ContainerService:
@@ -433,45 +487,70 @@ class ContainerService:
     def _provision_compose(self, instance: ContainerInstance, challenge: ContainerChallenge, flag: str):
         """
         Provision multi-container group from compose_config YAML.
-        
-        Creates a private Docker network, spawns all containers,
-        and connects the entry container to tailscale-challenges.
+
+        Supports two routing modes:
+        - Tailscale mode (default): allocates a port and routes traffic via tailscale serve.
+        - Traefik mode: no port allocated; Traefik container joins the per-instance bridge and
+          routes traffic using labels attached to the containers.
+
+        Traefik mode is activated when the YAML has `traefik: true` at the top level, OR when
+        any container's labels contain `traefik.enable: "true"`.
         """
         import yaml
         import re
-        
+
         try:
             config = yaml.safe_load(challenge.compose_config)
             containers_list = config.get('containers', [])
-            
+
             if not containers_list:
                 raise Exception("compose_config has no 'containers' defined")
-            
-            # Find entry container (the one with 'expose')
-            entry_def = None
+
+            # --- Traefik-mode detection ---
+            use_traefik = bool(config.get('traefik', False))
+            if not use_traefik:
+                for c in containers_list:
+                    if str(c.get('labels', {}).get('traefik.enable', '')).lower() == 'true':
+                        use_traefik = True
+                        break
+
+            # --- Placeholder substitution for label values ---
+            _account_prefix = _extract_instance_prefix(instance.account_id)
+            _challenge_slug = _re_top.sub(r'[^a-z0-9]+', '-',
+                                          challenge.name.lower()).strip('-')[:24]
+            _instance_name = f"{_account_prefix}-{_challenge_slug}-{instance.uuid[:8]}"
+
+            substitutions = {
+                '{uuid}': instance.uuid[:8],
+                '{full_uuid}': instance.uuid,
+                '{account_id}': str(instance.account_id),
+                '{challenge_id}': str(challenge.id),
+                '{instance_name}': _instance_name,
+            }
+
+            def _apply_substitutions(text: str) -> str:
+                for placeholder, value in substitutions.items():
+                    text = text.replace(placeholder, value)
+                return text
+
+            # Apply substitutions to each container's labels dict in-place (both keys and values)
             for c in containers_list:
-                if c.get('expose'):
-                    entry_def = c
-                    break
-            
-            if entry_def is None:
-                raise Exception("No container has 'expose'. One container must expose a port.")
-            
-            entry_port = int(entry_def['expose'])
-            
-            # Allocate port for tailnet
-            host_port = self.port_manager.allocate_port()
-            
+                if c.get('labels'):
+                    c['labels'] = {
+                        _apply_substitutions(k): _apply_substitutions(str(v))
+                        for k, v in c['labels'].items()
+                    }
+
             # Get config
             from ..models.config import ContainerConfig
             connection_host = ContainerConfig.get('connection_host', 'localhost')
-            
+
             # Generate names
             safe_name = re.sub(r'[^a-zA-Z0-9-]', '', challenge.name.replace(' ', '-').lower())
             name_prefix = f"{safe_name}-{instance.account_id}"
             network_name = f"ctfd-compose-{instance.uuid[:12]}"
-            
-            # Labels for all containers
+
+            # Instance-level labels applied to every container
             labels = {
                 'ctfd.instance_uuid': instance.uuid,
                 'ctfd.challenge_id': str(challenge.id),
@@ -480,41 +559,118 @@ class ContainerService:
                 'ctfd.managed': 'true',
                 'ctfd.plugin': 'containers',
             }
-            
-            # Create container group
-            result = self.docker.create_container_group(
-                containers_config=containers_list,
-                network_name=network_name,
-                entry_port=entry_port,
-                host_port=host_port,
-                flag=flag,
-                labels=labels,
-                name_prefix=name_prefix,
-                memory_limit=challenge.get_memory_limit(),
-                cpu_limit=challenge.get_cpu_limit(),
-                pids_limit=challenge.pids_limit,
-                connection_host=connection_host,
-                tailnet_container=TAILNET_CONTAINER,
-            )
-            
-            # Update instance
-            instance.container_id = result['entry_container_id']
-            instance.container_ids = result['container_ids']
-            instance.network_id = result['network_id']
-            instance.connection_port = host_port
-            instance.connection_ports = {str(entry_port): host_port}
-            instance.connection_host = connection_host
-            instance.connection_info = {
-                'type': challenge.container_connection_type or 'http',
-                'info': challenge.container_connection_info,
-                'compose': True,
-                'containers': len(containers_list),
-            }
+
+            if use_traefik:
+                # --- Traefik path ---
+                traefik_container = ContainerConfig.get('traefik_container', 'traefik')
+
+                # Find entry container (optional in pure Traefik mode — may have no expose)
+                entry_port = None
+                for c in containers_list:
+                    if c.get('expose'):
+                        entry_port = int(c['expose'])
+                        break
+                # If no container has 'expose', use a placeholder (tailscale won't run)
+                if entry_port is None:
+                    entry_port = 80
+
+                result = self.docker.create_container_group(
+                    containers_config=containers_list,
+                    network_name=network_name,
+                    entry_port=entry_port,
+                    host_port=None,
+                    flag=flag,
+                    labels=labels,
+                    name_prefix=name_prefix,
+                    memory_limit=challenge.get_memory_limit(),
+                    cpu_limit=challenge.get_cpu_limit(),
+                    pids_limit=challenge.pids_limit,
+                    connection_host=connection_host,
+                    tailnet_container=TAILNET_CONTAINER,
+                    traefik_container=traefik_container,
+                )
+
+                # Extract Traefik URL from container labels (Host(`...`) rule)
+                traefik_url = None
+                for c in containers_list:
+                    for k, v in c.get('labels', {}).items():
+                        if 'rule' in k and 'Host(' in v:
+                            import re as _re
+                            m = _re.search(r'Host\(`([^`]+)`\)', v)
+                            if m:
+                                scheme = 'https' if 'websecure' in str(c.get('labels', {})) else 'http'
+                                traefik_url = f"{scheme}://{m.group(1)}"
+                                break
+                    if traefik_url:
+                        break
+
+                instance.container_id = result['entry_container_id']
+                instance.container_ids = result['container_ids']
+                instance.network_id = result['network_id']
+                instance.connection_port = None
+                instance.connection_ports = None
+                instance.connection_host = connection_host
+                instance.connection_info = {
+                    'type': challenge.container_connection_type or 'http',
+                    'info': challenge.container_connection_info,
+                    'compose': True,
+                    'traefik': True,
+                    'traefik_container': traefik_container,
+                    'traefik_url': traefik_url,
+                    'containers': len(containers_list),
+                }
+                host_port = None
+
+            else:
+                # --- Tailscale path ---
+                # Find entry container
+                entry_def = None
+                for c in containers_list:
+                    if c.get('expose'):
+                        entry_def = c
+                        break
+
+                if entry_def is None:
+                    raise Exception("No container has 'expose'. One container must expose a port.")
+
+                entry_port = int(entry_def['expose'])
+
+                # Allocate port for tailnet
+                host_port = self.port_manager.allocate_port()
+
+                result = self.docker.create_container_group(
+                    containers_config=containers_list,
+                    network_name=network_name,
+                    entry_port=entry_port,
+                    host_port=host_port,
+                    flag=flag,
+                    labels=labels,
+                    name_prefix=name_prefix,
+                    memory_limit=challenge.get_memory_limit(),
+                    cpu_limit=challenge.get_cpu_limit(),
+                    pids_limit=challenge.pids_limit,
+                    connection_host=connection_host,
+                    tailnet_container=TAILNET_CONTAINER,
+                )
+
+                instance.container_id = result['entry_container_id']
+                instance.container_ids = result['container_ids']
+                instance.network_id = result['network_id']
+                instance.connection_port = host_port
+                instance.connection_ports = {str(entry_port): host_port}
+                instance.connection_host = connection_host
+                instance.connection_info = {
+                    'type': challenge.container_connection_type or 'http',
+                    'info': challenge.container_connection_info,
+                    'compose': True,
+                    'containers': len(containers_list),
+                }
+
             instance.status = 'running'
             instance.started_at = datetime.utcnow()
-            
+
             db.session.commit()
-            
+
             # Schedule Redis expiration
             try:
                 from .. import redis_expiration_service
@@ -523,12 +679,13 @@ class ContainerService:
                     redis_expiration_service.schedule_expiration(instance.uuid, expires_in)
             except Exception as e:
                 logger.warning(f"Failed to schedule Redis expiration: {e}")
-            
+
             logger.info(
                 f"Provisioned compose group for instance {instance.uuid}: "
-                f"{len(containers_list)} containers, network={network_name}, port={host_port}"
+                f"{len(containers_list)} containers, network={network_name}, "
+                f"{'traefik' if use_traefik else f'port={host_port}'}"
             )
-            
+
             # Audit log
             self._create_audit_log(
                 'instance_started',
@@ -537,12 +694,13 @@ class ContainerService:
                 account_id=instance.account_id,
                 details={
                     'compose': True,
+                    'traefik': use_traefik,
                     'containers': len(containers_list),
                     'network': network_name,
                     'port': host_port,
                 }
             )
-            
+
         except Exception as e:
             logger.error(f"Error provisioning compose group: {e}")
             if self.notification_service:
@@ -635,11 +793,14 @@ class ContainerService:
             # Stop Docker container(s)
             if instance.container_ids:
                 # Multi-container mode: stop all containers + remove network
+                compose_info = instance.connection_info or {}
+                traefik_container = compose_info.get('traefik_container') if compose_info.get('traefik') else None
                 self.docker.stop_container_group(
-                    instance.container_ids, 
+                    instance.container_ids,
                     instance.network_id,
                     host_port=instance.connection_port,
                     tailnet_container=TAILNET_CONTAINER,
+                    traefik_container=traefik_container,
                 )
             elif instance.container_id:
                 # Single-container mode

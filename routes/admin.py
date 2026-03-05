@@ -174,6 +174,8 @@ def settings():
         'subdomain_network': ContainerConfig.get('subdomain_network', 'ctfd-network'),
         'container_max_concurrent_count': ContainerConfig.get('container_max_concurrent_count', '3'),
         'container_discord_webhook_url': ContainerConfig.get('container_discord_webhook_url', ''),
+        # Traefik compose mode
+        'traefik_container': ContainerConfig.get('traefik_container', 'traefik'),
     }
     
     # Get Docker status
