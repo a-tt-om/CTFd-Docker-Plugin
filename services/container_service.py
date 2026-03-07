@@ -104,14 +104,7 @@ class ContainerService:
             raise Exception("Challenge not found")
         
         # 2. Check if already solved (prevent creating instance after solve)
-        from CTFd.models import Solves
-        already_solved = Solves.query.filter_by(
-            challenge_id=challenge_id,
-            account_id=account_id
-        ).first()
-        
-        if already_solved:
-            raise Exception("Challenge already solved - cannot create new instance")
+        # removed check
         
         # 3. Check if already has running instance
         existing = ContainerInstance.query.filter_by(
