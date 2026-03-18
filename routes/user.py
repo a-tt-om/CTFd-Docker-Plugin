@@ -30,6 +30,8 @@ def _build_connection(instance):
     }
     if info.get('traefik') and info.get('traefik_url'):
         conn['traefik_url'] = info['traefik_url']
+    if info.get('traefik_urls'):
+        conn['traefik_urls'] = info['traefik_urls']
     return conn
 
 

@@ -103,7 +103,10 @@ class ContainerService:
         if not challenge:
             raise Exception("Challenge not found")
         
-        # 2. Check if already has running instance
+        # 2. Check if already solved (prevent creating instance after solve)
+        # removed check
+        
+        # 3. Check if already has running instance
         existing = ContainerInstance.query.filter_by(
             challenge_id=challenge_id,
             account_id=account_id,
@@ -576,6 +579,7 @@ class ContainerService:
 
                 # Extract Traefik URL from container labels (Host(`...`) rule)
                 traefik_url = None
+                traefik_urls = []
                 for c in containers_list:
                     for k, v in c.get('labels', {}).items():
                         if 'rule' in k and 'Host(' in v:
@@ -583,10 +587,13 @@ class ContainerService:
                             m = _re.search(r'Host\(`([^`]+)`\)', v)
                             if m:
                                 scheme = 'https' if 'websecure' in str(c.get('labels', {})) else 'http'
-                                traefik_url = f"{scheme}://{m.group(1)}"
-                                break
-                    if traefik_url:
-                        break
+                                url = f"{scheme}://{m.group(1)}"
+                                traefik_urls.append({
+                                    'name': c.get('name', ''),
+                                    'url': url
+                                })
+                                if not traefik_url:
+                                    traefik_url = url
 
                 instance.container_id = result['entry_container_id']
                 instance.container_ids = result['container_ids']
@@ -601,6 +608,7 @@ class ContainerService:
                     'traefik': True,
                     'traefik_container': traefik_container,
                     'traefik_url': traefik_url,
+                    'traefik_urls': traefik_urls,
                     'containers': len(containers_list),
                 }
                 host_port = None
